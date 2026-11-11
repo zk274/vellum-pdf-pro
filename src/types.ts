@@ -242,6 +242,11 @@ declare global {
       openFileDialog: () => Promise<string | null>;
       saveFileDialog: (defaultFilename?: string) => Promise<string | null>;
       printDocument: () => Promise<{ printed: boolean }>;
+      minimizeWindow?: () => Promise<void>;
+      toggleMaximizeWindow?: () => Promise<boolean>;
+      closeWindow?: () => Promise<void>;
+      isWindowMaximized?: () => Promise<boolean>;
+      onWindowStateChange?: (cb: (state: { isMaximized: boolean }) => void) => () => void;
       onMenuAction: (cb: (payload: { action: string; [key: string]: any }) => void) => () => void;
     };
   }

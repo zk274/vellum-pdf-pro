@@ -312,6 +312,25 @@ function buildNativeLinuxMenu() {
         { label: 'Close Current Tab', accelerator: 'CmdOrCtrl+W', click: () => sendMenuAction('close-tab') },
         { type: 'separator' },
         { role: 'minimize' },
+        {
+          label: 'Maximize / Restore Window',
+          accelerator: 'F11',
+          click: () => {
+            if (mainWindow && !mainWindow.isDestroyed()) {
+              if (mainWindow.isMaximized()) mainWindow.unmaximize();
+              else mainWindow.maximize();
+            }
+          },
+        },
+        { role: 'togglefullscreen' },
+        { type: 'separator' },
+        {
+          label: 'Close Window',
+          accelerator: 'Alt+F4',
+          click: () => {
+            if (mainWindow && !mainWindow.isDestroyed()) mainWindow.close();
+          },
+        },
       ],
     },
     {
@@ -348,12 +367,27 @@ async function createWindow() {
     minHeight: 680,
     title: 'Vellum PDF Pro — Linux Desktop PDF Editor',
     backgroundColor: '#0f172a',
+    frame: false,
+    resizable: true,
     autoHideMenuBar: false,
     webPreferences: {
       preload: path.join(__dirname, 'preload.cjs'),
       contextIsolation: true,
       nodeIntegration: false,
     },
+  });
+
+  // Track window maximize / restore state to notify renderer
+  mainWindow.on('maximize', () => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('vellum:window-state-changed', { isMaximized: true });
+    }
+  });
+
+  mainWindow.on('unmaximize', () => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('vellum:window-state-changed', { isMaximized: false });
+    }
   });
 
   // Hide the redundant native GTK menu bar on Linux so the in-app React menu is the single,
@@ -436,6 +470,34 @@ ipcMain.handle('vellum:print-document', async () => {
   if (!mainWindow) return { printed: false };
   mainWindow.webContents.print({ silent: false, printBackground: true });
   return { printed: true };
+});
+
+ipcMain.handle('vellum:window-minimize', () => {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.minimize();
+  }
+});
+
+ipcMain.handle('vellum:window-toggle-maximize', () => {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    if (mainWindow.isMaximized()) {
+      mainWindow.unmaximize();
+    } else {
+      mainWindow.maximize();
+    }
+    return mainWindow.isMaximized();
+  }
+  return false;
+});
+
+ipcMain.handle('vellum:window-close', () => {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.close();
+  }
+});
+
+ipcMain.handle('vellum:window-is-maximized', () => {
+  return mainWindow && !mainWindow.isDestroyed() ? mainWindow.isMaximized() : false;
 });
 
 app.whenReady().then(createWindow);

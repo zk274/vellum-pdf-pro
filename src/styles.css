@@ -63,25 +63,143 @@ html,
   flex-direction: column;
   width: 100%;
   height: 100%;
+  box-sizing: border-box;
 }
 
-/* Top Menu Bar */
+.app-shell:not(.is-maximized) {
+  border: 1px solid var(--border-color);
+}
+
+/* Top Menu Bar (Integrated Frameless Header) */
 .top-menubar {
   display: flex;
   align-items: center;
   justify-content: space-between;
   height: 32px;
-  padding: 0 10px;
+  min-height: 32px;
+  padding: 0 0 0 8px;
   background: var(--bg-panel);
   border-bottom: 1px solid var(--border-color);
   font-size: 12px;
+  -webkit-app-region: drag;
+  user-select: none;
 }
 
-.menubar-left,
+.menubar-left {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex-shrink: 0;
+  -webkit-app-region: no-drag;
+}
+
+.menubar-drag-region {
+  flex: 1 1 auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  min-width: 30px;
+  padding: 0 10px;
+  -webkit-app-region: drag;
+  cursor: default;
+  overflow: hidden;
+}
+
+.window-title-caption {
+  font-size: 11.5px;
+  color: var(--text-secondary);
+  opacity: 0.75;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 420px;
+  pointer-events: none;
+  font-weight: 500;
+  letter-spacing: 0.01em;
+}
+
 .menubar-right {
   display: flex;
   align-items: center;
   gap: 4px;
+  flex-shrink: 0;
+  height: 100%;
+  -webkit-app-region: no-drag;
+}
+
+.brand-badge,
+.menu-item-wrap,
+.menu-trigger,
+.menu-dropdown,
+.menubar-right form,
+.menubar-right input,
+.menubar-right button,
+.window-controls,
+.window-control-btn {
+  -webkit-app-region: no-drag;
+}
+
+/* Integrated Window Controls */
+.window-controls {
+  display: flex;
+  align-items: stretch;
+  height: 100%;
+  margin-left: 6px;
+  -webkit-app-region: no-drag;
+}
+
+.window-control-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 42px;
+  height: 100%;
+  background: transparent;
+  border: none;
+  border-radius: 0;
+  padding: 0;
+  margin: 0;
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: background-color 0.12s ease, color 0.12s ease;
+  -webkit-app-region: no-drag;
+}
+
+.window-control-btn:hover {
+  background: rgba(255, 255, 255, 0.09);
+  color: var(--text-primary);
+}
+
+.theme-light .window-control-btn:hover {
+  background: rgba(0, 0, 0, 0.07);
+  color: var(--text-primary);
+}
+
+.window-control-btn.close:hover {
+  background: #e11d48 !important;
+  color: #ffffff !important;
+}
+
+.window-control-btn.close:active {
+  background: #be123c !important;
+  color: #ffffff !important;
+}
+
+.window-control-btn:focus-visible {
+  outline: 1px solid var(--accent-blue);
+  outline-offset: -1px;
+}
+
+.doc-tabbar,
+.edit-ribbon,
+.workspace-body,
+.canvas-viewport,
+.pdf-page-stage,
+.status-bar,
+.modal-backdrop,
+.palette-backdrop {
+  -webkit-app-region: no-drag;
 }
 
 .brand-badge {

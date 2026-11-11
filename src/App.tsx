@@ -283,6 +283,42 @@ export default function App() {
     setStatusBanner({ text, kind });
   }, []);
 
+  // Frameless Desktop Window state & handlers
+  const [isMaximized, setIsMaximized] = useState<boolean>(false);
+
+  useEffect(() => {
+    if (window.vellumDesktop?.isWindowMaximized) {
+      window.vellumDesktop.isWindowMaximized().then(setIsMaximized).catch(() => {});
+    }
+    if (window.vellumDesktop?.onWindowStateChange) {
+      const cleanup = window.vellumDesktop.onWindowStateChange((state) => {
+        setIsMaximized(state.isMaximized);
+      });
+      return cleanup;
+    }
+  }, []);
+
+  const handleMinimizeWindow = useCallback(() => {
+    if (window.vellumDesktop?.minimizeWindow) {
+      window.vellumDesktop.minimizeWindow();
+    }
+  }, []);
+
+  const handleToggleMaximize = useCallback(async () => {
+    if (window.vellumDesktop?.toggleMaximizeWindow) {
+      const isMax = await window.vellumDesktop.toggleMaximizeWindow();
+      setIsMaximized(isMax);
+    }
+  }, []);
+
+  const handleCloseWindow = useCallback(() => {
+    if (window.vellumDesktop?.closeWindow) {
+      window.vellumDesktop.closeWindow();
+    } else {
+      window.close();
+    }
+  }, []);
+
   // Sync theme attribute on document
   useEffect(() => {
     document.documentElement.setAttribute('data-theme', theme);
@@ -1186,7 +1222,7 @@ export default function App() {
 
   return (
     <div
-      className="app-shell"
+      className={`app-shell theme-${theme} ${isMaximized ? 'is-maximized' : ''}`}
       onClick={() => {
         if (openMenu) setOpenMenu(null);
       }}
@@ -1494,6 +1530,34 @@ export default function App() {
             </button>
             {openMenu === 'window' && (
               <div className="menu-dropdown" onClick={() => setOpenMenu(null)}>
+                {window.vellumDesktop?.isDesktopApp && (
+                  <>
+                    <button onClick={handleMinimizeWindow}>
+                      <span>Minimize Window</span>
+                    </button>
+                    <button onClick={handleToggleMaximize}>
+                      <span>{isMaximized ? 'Restore Window' : 'Maximize Window'}</span>
+                      <span className="kbd">F11</span>
+                    </button>
+                    <button onClick={handleCloseWindow}>
+                      <span>Close Window</span>
+                      <span className="kbd">Alt+F4</span>
+                    </button>
+                    <div style={{ height: 1, background: 'var(--border-color)', margin: '4px 0' }} />
+                  </>
+                )}
+                {openDocs.length > 1 && (
+                  <button
+                    onClick={() => {
+                      const idx = openDocs.findIndex((d) => d.doc_id === activeDocId);
+                      const next = openDocs[(idx + 1) % openDocs.length];
+                      if (next) setActiveDocId(next.doc_id);
+                    }}
+                  >
+                    <span>Next Document Tab</span>
+                    <span className="kbd">Ctrl+Tab</span>
+                  </button>
+                )}
                 <button
                   onClick={async () => {
                     const rec = await pdfApi.listRecovery();
@@ -1555,7 +1619,18 @@ export default function App() {
           </div>
         </div>
 
-        {/* Right side of Top Menu Bar: Search, Command Palette, Theme Toggle */}
+        {/* Center Draggable Window Header / Document Title */}
+        <div
+          className="menubar-drag-region"
+          onDoubleClick={handleToggleMaximize}
+          title="Drag to move · Double-click to maximize or restore"
+        >
+          <span className="window-title-caption">
+            {activeDoc ? `${activeDoc.filename} — Vellum PDF Pro` : 'Vellum PDF Pro'}
+          </span>
+        </div>
+
+        {/* Right side of Top Menu Bar: Search, Command Palette, Theme Toggle, Window Controls */}
         <div className="menubar-right">
           <form onSubmit={handleRunSearch} style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
             <input
@@ -1564,7 +1639,7 @@ export default function App() {
               placeholder="Search in PDF (Ctrl+F)..."
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
-              style={{ width: 175, height: 24, fontSize: 11.5 }}
+              style={{ width: 165, height: 24, fontSize: 11.5 }}
             />
             {searchMatches.length > 0 && (
               <span className="badge pass" style={{ cursor: 'pointer' }} onClick={() => setSearchMatches([])}>
@@ -1585,6 +1660,52 @@ export default function App() {
           >
             {theme === 'dark' ? <Sun size={14} /> : <Moon size={14} />}
           </button>
+
+          {/* Integrated Frameless Window Controls */}
+          {window.vellumDesktop?.isDesktopApp && (
+            <div className="window-controls" aria-label="Window Management Controls">
+              <button
+                type="button"
+                className="window-control-btn minimize"
+                onClick={handleMinimizeWindow}
+                title="Minimize Window"
+                aria-label="Minimize Window"
+              >
+                <svg width="10" height="10" viewBox="0 0 16 16" fill="currentColor">
+                  <rect x="2" y="8" width="12" height="1.6" />
+                </svg>
+              </button>
+              <button
+                type="button"
+                className="window-control-btn maximize"
+                onClick={handleToggleMaximize}
+                title={isMaximized ? 'Restore Window (F11)' : 'Maximize Window (F11)'}
+                aria-label={isMaximized ? 'Restore Window' : 'Maximize Window'}
+              >
+                {isMaximized ? (
+                  <svg width="10" height="10" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6">
+                    <path d="M4.5 4.5V1.5h10v10h-3" />
+                    <rect x="1.5" y="4.5" width="10" height="10" />
+                  </svg>
+                ) : (
+                  <svg width="10" height="10" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6">
+                    <rect x="1.5" y="1.5" width="13" height="13" />
+                  </svg>
+                )}
+              </button>
+              <button
+                type="button"
+                className="window-control-btn close"
+                onClick={handleCloseWindow}
+                title="Close Vellum PDF Pro (Alt+F4)"
+                aria-label="Close Vellum PDF Pro"
+              >
+                <svg width="10" height="10" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.8">
+                  <path d="M2.5 2.5l11 11M13.5 2.5l-11 11" />
+                </svg>
+              </button>
+            </div>
+          )}
         </div>
       </header>
 

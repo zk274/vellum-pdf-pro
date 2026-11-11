@@ -8,6 +8,13 @@ The project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html
 ## [Unreleased]
 
 ### Added
+- **Integrated Frameless Linux Desktop Window**:
+  - Eliminated the separate OS title bar on Linux desktops (`frame: false`), uniting window controls, document caption, menus, search, command palette, and theme options into a single compact header.
+  - Added integrated desktop window controls (Minimize, Maximize / Restore with dynamic icon switching, Close with red hover highlight).
+  - Implemented secure Electron IPC channels (`vellum:window-minimize`, `vellum:window-toggle-maximize`, `vellum:window-close`, `vellum:window-is-maximized`) preserving context isolation without exposing raw Node or Electron APIs.
+  - Configured precise draggable regions (`-webkit-app-region: drag`) and non-draggable interactive bounds (`-webkit-app-region: no-drag`) to prevent drag interference with menus, search inputs, tabs, or canvas interactions.
+  - Supported native double-click-to-maximize behavior across Wayland (Mutter) and X11 compositors.
+  - Verified responsive layouts across 1520×940, 1280×800, and minimum 1024×680 dimensions in both dark and light desktop themes.
 - **Inline Text Box Editor**:
   - Replaced unsupported browser `prompt()` dialog in "Add Text Box" with a WYSIWYG interactive `.inline-textbox-overlay` directly on the PDF canvas stage.
   - Floating toolbar with `Insert` (`Ctrl+Enter`), `Cancel` (`Esc`), and keyboard hints.
