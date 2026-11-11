@@ -257,6 +257,11 @@ function buildNativeLinuxMenu() {
         { label: 'Undo', accelerator: 'CmdOrCtrl+Z', click: () => sendMenuAction('undo') },
         { label: 'Redo', accelerator: 'CmdOrCtrl+Y', click: () => sendMenuAction('redo') },
         { type: 'separator' },
+        { role: 'cut' },
+        { role: 'copy' },
+        { role: 'paste' },
+        { role: 'selectAll' },
+        { type: 'separator' },
         { label: 'Edit PDF Content Mode', accelerator: 'CmdOrCtrl+E', click: () => sendMenuAction('set-mode', { mode: 'edit' }) },
         { label: 'Find in Document...', accelerator: 'CmdOrCtrl+F', click: () => sendMenuAction('focus-search') },
         { label: 'Command Palette...', accelerator: 'CmdOrCtrl+K', click: () => sendMenuAction('command-palette') },
@@ -314,6 +319,7 @@ function buildNativeLinuxMenu() {
       submenu: [
         { label: 'Command Palette & Shortcuts', accelerator: 'F1', click: () => sendMenuAction('command-palette') },
         { label: 'Crash Recovery Manager', click: () => sendMenuAction('open-recovery') },
+        { label: 'Backend Diagnostics & Logs', click: () => sendMenuAction('backend-diag') },
         { label: 'Retry Backend Connection', click: () => sendMenuAction('retry-backend') },
         {
           label: 'Restart Backend Engine',
@@ -342,12 +348,17 @@ async function createWindow() {
     minHeight: 680,
     title: 'Vellum PDF Pro — Linux Desktop PDF Editor',
     backgroundColor: '#0f172a',
+    autoHideMenuBar: false,
     webPreferences: {
       preload: path.join(__dirname, 'preload.cjs'),
       contextIsolation: true,
       nodeIntegration: false,
     },
   });
+
+  // Hide the redundant native GTK menu bar on Linux so the in-app React menu is the single,
+  // unified desktop interface, while preserving native accelerator dispatch and shortcuts.
+  mainWindow.setMenuBarVisibility(false);
 
   const devServerUrl = process.env.VITE_DEV_SERVER_URL;
   const distIndex = path.join(__dirname, '..', 'dist', 'index.html');

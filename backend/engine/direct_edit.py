@@ -763,33 +763,50 @@ def add_text_object(
 
         info = resolve_pdf_font(font_name, bold=bold, italic=italic, text_content=text)
         rgb = hex_to_rgb_float(color_hex)
-        pad = 4.0 if (background_hex or border_width > 0) else 0.0
-        if align == "left":
-            for i, ln in enumerate(text.split("\n")):
-                if not ln:
-                    continue
-                disp_pt = (d.x0 + pad, d.y0 + pad + font_size * 0.9 + i * font_size * 1.25)
-                page.insert_text(
-                    pymupdf.Point(point_to_pdf(page, disp_pt)),
-                    ln,
-                    fontsize=float(font_size),
-                    fontname=info["fontname"],
-                    fontfile=info["fontfile"],
-                    color=rgb,
-                    rotate=page.rotation,
-                )
-        else:
-            inner = pymupdf.Rect(rect.x0 + pad, rect.y0 + pad, rect.x1 - pad, rect.y1 - pad)
+        pad = 4.0 if (background_hex or (border_hex and border_width > 0)) else 1.0
+
+        d_inner = pymupdf.Rect(
+            d.x0 + pad,
+            d.y0 + pad,
+            max(d.x0 + pad + 10, d.x1 - pad),
+            max(d.y0 + pad + 10, d.y1 - pad),
+        )
+        inner = pymupdf.Rect(rect_to_pdf(page, d_inner))
+        align_code = ALIGN_MAP.get(align, pymupdf.TEXT_ALIGN_LEFT)
+
+        rc = page.insert_textbox(
+            inner,
+            text,
+            fontsize=float(font_size),
+            fontname=info["fontname"],
+            fontfile=info["fontfile"],
+            color=rgb,
+            align=align_code,
+            rotate=page.rotation,
+        )
+
+        # If text overflowed the designated box height, expand downward to accommodate full wrapped text
+        if rc < 0:
+            overflow_h = max(abs(rc), font_size * 2.0)
+            d_expanded = pymupdf.Rect(d.x0, d.y0, d.x1, d.y1 + overflow_h + 12)
+            d_inner_exp = pymupdf.Rect(
+                d_expanded.x0 + pad,
+                d_expanded.y0 + pad,
+                max(d_expanded.x0 + pad + 10, d_expanded.x1 - pad),
+                max(d_expanded.y0 + pad + 10, d_expanded.y1 - pad),
+            )
+            inner_exp = pymupdf.Rect(rect_to_pdf(page, d_inner_exp))
             page.insert_textbox(
-                inner,
+                inner_exp,
                 text,
                 fontsize=float(font_size),
                 fontname=info["fontname"],
                 fontfile=info["fontfile"],
                 color=rgb,
-                align=ALIGN_MAP.get(align, 0),
+                align=align_code,
                 rotate=page.rotation,
             )
+
         return doc.tobytes(garbage=1, deflate=True)
     finally:
         doc.close()

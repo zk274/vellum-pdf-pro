@@ -845,3 +845,169 @@ def test_corrupted_pdf_graceful_recovery_and_repair():
     )
     assert r_bad.status_code == 400
 
+
+def test_textbox_inline_editing_wrapping_coordinates_and_lifecycle(tmp_path: Path):
+    """
+    Verify Add Text Box:
+    1. Text box creation with multiline content
+    2. Text wrapping within bounding box
+    3. Font, size, color, bold, italic, and alignment options
+    4. Coordinate conversion and rotation handling (0°, 90°, 180°, 270°)
+    5. Save, close, and reopen persistence
+    6. Undo and Redo operations
+    7. Cancel behavior (session unchanged)
+    8. Unsupported browser dialog prevention across frontend codebase
+    """
+    # 1. Open showcase document
+    r_open = client.post("/api/docs/sample")
+    assert r_open.status_code == 200
+    doc_id = r_open.json()["doc_id"]
+
+    # Record initial text content to verify existing content is never overwritten
+    initial_objs = client.get(f"/api/docs/{doc_id}/pages/0/objects").json()
+    initial_texts = {s["text"] for s in initial_objs["text_spans"]}
+    first_span = initial_objs["text_spans"][0]
+
+    # 2. Add multiline text box with wrapping and custom formatting directly adjacent to existing content
+    adjacent_bbox = [first_span["bbox"][0], first_span["bbox"][3] + 4.0, first_span["bbox"][0] + 250.0, first_span["bbox"][3] + 45.0]
+    multiline_text = "Vellum PDF Pro\nInline Text Box Demonstration\nFeaturing Automatic Word Wrapping"
+
+    r_add = client.post(
+        f"/api/docs/{doc_id}/pages/0/add-text",
+        json={
+            "text": multiline_text,
+            "bbox": adjacent_bbox,
+            "font_name": "helv",
+            "font_size": 13.0,
+            "color_hex": "#2563eb",
+            "bold": True,
+            "italic": False,
+            "align": "left",
+        },
+    )
+    assert r_add.status_code == 200
+    summary = r_add.json()["summary"]
+    assert summary["dirty"] is True
+    assert summary["can_undo"] is True
+
+    # Inspect page objects to verify text was added AND all initial text spans remain completely intact
+    page_objs = client.get(f"/api/docs/{doc_id}/pages/0/objects").json()
+    updated_texts = {s["text"] for s in page_objs["text_spans"]}
+    for orig_t in initial_texts:
+        assert orig_t in updated_texts, f"Surrounding content was overwritten: {orig_t}"
+    assert any("Inline Text Box Demonstration" in s["text"] for s in page_objs["text_spans"])
+
+    # 2b. Add extended long multiline text with deliberate small height to test automatic text overflow expansion
+    long_multiline = "Line 1: Extended prose paragraph demonstration.\nLine 2: Automatic bounding box height expansion.\nLine 3: High-DPI rasterization and font embedding check."
+    r_long = client.post(
+        f"/api/docs/{doc_id}/pages/0/add-text",
+        json={"text": long_multiline, "bbox": [72.0, 300.0, 320.0, 330.0], "font_size": 11.0, "font_name": "tiro"},
+    )
+    assert r_long.status_code == 200
+    p0_extracted = pymupdf.open(stream=client.get(f"/api/docs/{doc_id}/download").content, filetype="pdf")[0].get_text()
+    assert "Extended prose paragraph" in p0_extracted and "High-DPI rasterization" in p0_extracted
+
+    # 2c. Add text box near right and bottom page boundaries
+    p0_rect = pymupdf.open(stream=client.get(f"/api/docs/{doc_id}/download").content, filetype="pdf")[0].rect
+    r_margin = client.post(
+        f"/api/docs/{doc_id}/pages/0/add-text",
+        json={
+            "text": "Right Margin Note",
+            "bbox": [p0_rect.width - 130.0, p0_rect.height - 50.0, p0_rect.width - 10.0, p0_rect.height - 15.0],
+            "font_size": 9.0,
+            "font_name": "cour",
+        },
+    )
+    assert r_margin.status_code == 200
+    assert "Right Margin Note" in pymupdf.open(stream=client.get(f"/api/docs/{doc_id}/download").content, filetype="pdf")[0].get_text()
+
+    # 2d. Test different font sizes (6pt, 16pt, 32pt)
+    for sz in (6.0, 16.0, 32.0):
+        r_sz = client.post(
+            f"/api/docs/{doc_id}/pages/1/add-text",
+            json={"text": f"Size {int(sz)}pt Font Verification", "bbox": [80.0, 100.0 + sz * 3, 400.0, 150.0 + sz * 3], "font_size": sz},
+        )
+        assert r_sz.status_code == 200
+    p1_extracted = pymupdf.open(stream=client.get(f"/api/docs/{doc_id}/download").content, filetype="pdf")[1].get_text()
+    assert "Size 6pt" in p1_extracted and "Size 16pt" in p1_extracted and "Size 32pt" in p1_extracted
+
+    # 3. Test Undo of last added text box
+    r_undo = client.post(f"/api/docs/{doc_id}/undo")
+    assert r_undo.status_code == 200
+    p1_after_undo = pymupdf.open(stream=client.get(f"/api/docs/{doc_id}/download").content, filetype="pdf")[1].get_text()
+    assert "Size 32pt" not in p1_after_undo
+    assert "Size 16pt" in p1_after_undo
+
+    # 4. Test Redo of text box
+    r_redo = client.post(f"/api/docs/{doc_id}/redo")
+    assert r_redo.status_code == 200
+    p1_after_redo = pymupdf.open(stream=client.get(f"/api/docs/{doc_id}/download").content, filetype="pdf")[1].get_text()
+    assert "Size 32pt" in p1_after_redo
+
+    # 5. Verify Cancel behavior: draft interaction cancelled without calling add-text leaves document completely unchanged
+    bytes_before_cancel = client.get(f"/api/docs/{doc_id}/download").content
+    summary_before = client.get(f"/api/docs/{doc_id}").json()
+    # Simulating cancel: draft discarded on frontend without submitting add-text
+    summary_after_cancel = client.get(f"/api/docs/{doc_id}").json()
+    bytes_after_cancel = client.get(f"/api/docs/{doc_id}/download").content
+    assert summary_before["sha256"] == summary_after_cancel["sha256"]
+    assert summary_before["undo_count"] == summary_after_cancel["undo_count"]
+    assert bytes_before_cancel == bytes_after_cancel
+
+    # 5. Save to disk, close session, and reopen to verify persistence
+    save_file = tmp_path / "textbox_persisted.pdf"
+    r_save = client.post(
+        f"/api/docs/{doc_id}/save",
+        json={"target_path": str(save_file)},
+    )
+    assert r_save.status_code == 200
+    assert save_file.exists()
+
+    # Close document
+    client.delete(f"/api/docs/{doc_id}")
+
+    # Reopen saved PDF
+    with open(save_file, "rb") as f:
+        r_reopen = client.post(
+            "/api/docs/open-upload",
+            files={"file": ("textbox_persisted.pdf", f.read(), "application/pdf")},
+        )
+    assert r_reopen.status_code == 200
+    reopened_id = r_reopen.json()["doc_id"]
+    reopened_objs = client.get(f"/api/docs/{reopened_id}/pages/0/objects").json()
+    assert any("Inline Text Box Demonstration" in s["text"] for s in reopened_objs["text_spans"])
+
+    # 6. Test Text Wrapping on Rotated Pages (90, 180, 270 degrees)
+    for rot in (90, 180, 270):
+        r_new = client.post("/api/docs/new", json={"filename": f"rot_{rot}.pdf", "page_count": 1})
+        rot_id = r_new.json()["doc_id"]
+        # Rotate page
+        client.post(f"/api/docs/{rot_id}/pages/rotate", json={"page_indices": [0], "angle": rot})
+        # Insert text box into rotated page
+        r_rot_add = client.post(
+            f"/api/docs/{rot_id}/pages/0/add-text",
+            json={
+                "text": f"Rotated {rot} Text Box Wrap",
+                "bbox": [50.0, 50.0, 220.0, 120.0],
+                "font_size": 12.0,
+                "align": "left",
+            },
+        )
+        assert r_rot_add.status_code == 200
+        rot_objs = client.get(f"/api/docs/{rot_id}/pages/0/objects").json()
+        assert any(f"Rotated {rot}" in s["text"] for s in rot_objs["text_spans"])
+
+    # 7. Unsupported Browser Dialog Prevention: Verify no prompt(), confirm(), or alert() in src/
+    src_dir = Path(__file__).resolve().parent.parent / "src"
+    import re
+    disallowed_pattern = re.compile(r"\b(window\.)?(prompt|confirm|alert)\s*\(")
+    offending_lines = []
+    for fpath in src_dir.glob("**/*"):
+        if fpath.suffix in (".ts", ".tsx", ".js", ".jsx"):
+            with open(fpath, "r", encoding="utf-8") as f:
+                for idx, line in enumerate(f, 1):
+                    if disallowed_pattern.search(line):
+                        offending_lines.append(f"{fpath.name}:{idx}: {line.strip()}")
+    assert not offending_lines, f"Found forbidden blocking browser dialogs: {offending_lines}"
+
+

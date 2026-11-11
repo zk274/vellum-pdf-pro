@@ -87,13 +87,19 @@ html,
 .brand-badge {
   display: flex;
   align-items: center;
-  gap: 6px;
-  font-weight: 700;
+  justify-content: center;
   color: var(--accent);
-  padding-right: 10px;
+  padding: 4px 6px;
   margin-right: 4px;
+  border-radius: 4px;
   border-right: 1px solid var(--border-color);
-  letter-spacing: 0.2px;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.brand-badge:hover {
+  background: var(--bg-hover);
+  color: var(--accent-hover);
 }
 
 .menu-item-wrap {
@@ -543,6 +549,88 @@ html,
   background: rgba(37, 99, 235, 0.18);
   pointer-events: none;
   z-index: 30;
+}
+
+/* Active Inline Text Box Overlay */
+.inline-textbox-overlay {
+  position: absolute;
+  border: 2px solid var(--accent);
+  background: rgba(255, 255, 255, 0.96);
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.35);
+  border-radius: 4px;
+  z-index: 60;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+[data-theme='dark'] .inline-textbox-overlay {
+  background: rgba(15, 23, 42, 0.96);
+  border-color: #3b82f6;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.7);
+}
+
+.inline-textbox-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  background: var(--bg-panel);
+  border-bottom: 1px solid var(--border-color);
+  font-size: 11px;
+  user-select: none;
+  flex-shrink: 0;
+}
+
+.inline-textbox-toolbar .mini-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 2px 8px;
+  border-radius: 4px;
+  border: none;
+  font-size: 11px;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.inline-textbox-toolbar .mini-btn.apply {
+  background: var(--accent);
+  color: #fff;
+}
+
+.inline-textbox-toolbar .mini-btn.apply:hover {
+  background: var(--accent-hover);
+}
+
+.inline-textbox-toolbar .mini-btn.cancel {
+  background: transparent;
+  color: var(--text-secondary);
+}
+
+.inline-textbox-toolbar .mini-btn.cancel:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.inline-textbox-toolbar .mini-hint {
+  font-size: 10px;
+  color: var(--text-muted);
+  margin-left: auto;
+}
+
+.inline-textbox-input {
+  flex: 1;
+  width: 100%;
+  height: 100%;
+  border: none;
+  outline: none;
+  resize: none;
+  padding: 6px 8px;
+  background: transparent;
+  color: inherit;
+  line-height: 1.35;
+  box-sizing: border-box;
 }
 
 /* Right Context-Sensitive Properties Panel */

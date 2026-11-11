@@ -5,7 +5,27 @@ The project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html
 
 ---
 
-## [1.0.0-beta.2] — 2026-11-10
+## [Unreleased]
+
+### Added
+- **Inline Text Box Editor**:
+  - Replaced unsupported browser `prompt()` dialog in "Add Text Box" with a WYSIWYG interactive `.inline-textbox-overlay` directly on the PDF canvas stage.
+  - Floating toolbar with `Insert` (`Ctrl+Enter`), `Cancel` (`Esc`), and keyboard hints.
+  - Right Context-Sensitive Properties Inspector (`right-inspector`) for live modification of font family (Helvetica, Times Roman, Courier, DejaVu Sans), font size, hex color, text alignment (Left, Center, Right, Justify), bold, italic, and point coordinates (X, Y, Width, Height).
+  - Word-wrapping support using PyMuPDF `page.insert_textbox` with automatic height overflow expansion.
+  - Full coordinate space and rotation handling for 0°, 90°, 180°, and 270° rotated PDF pages.
+- **Native Hyperlink Creation Modal**:
+  - Replaced browser `prompt()` dialog for "Add Hyperlink" with non-blocking React modal dialog with keyboard shortcuts (`Enter` / `Esc`) and URL validation.
+- **Unified Single Desktop Menu Bar**:
+  - Eliminated redundant native GTK menu bar on Linux desktop (`mainWindow.setMenuBarVisibility(false)`).
+  - Preserved native accelerator event routing and added standard desktop clipboard roles (Cut, Copy, Paste, Select All).
+  - Polished in-app React menu bar as the single primary navigation header across File, Edit, View, Document, Tools, Window, and Help.
+
+### Fixed
+- **Packaging Robustness**:
+  - Added atomic unlinking (`rm -f "$APPIMAGE_OUT"`) prior to binary concatenation in `scripts/build_packages.sh` to prevent `Text file busy` (`ETXTBSY`) errors when building packages while an AppImage is active.
+- **Automated Regression Coverage**:
+  - Added comprehensive test suite in `tests/test_pdf_engine_and_api.py` validating multiline text wrapping, font styling, overflow expansion, margin notes, rotated pages, undo/redo, cancel immutability, and zero `prompt()`/`confirm()`/`alert()` browser dialog usage in `src/`.
 
 ### Fixed
 - **Backend Startup Race Condition**:

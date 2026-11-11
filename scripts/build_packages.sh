@@ -217,6 +217,7 @@ SQUASHFS_IMG="$BUILD_TMP/appdir.squashfs"
 mksquashfs "$APPDIR" "$SQUASHFS_IMG" -comp gzip -root-owned -noappend -quiet
 
 APPIMAGE_OUT="$RELEASE_DIR/Vellum_PDF_Pro-${VERSION}-x86_64.AppImage"
+rm -f "$APPIMAGE_OUT"
 cat "$RUNTIME_BIN" "$SQUASHFS_IMG" > "$APPIMAGE_OUT"
 chmod +x "$APPIMAGE_OUT"
 rm -rf "$APPDIR" "$SQUASHFS_IMG"

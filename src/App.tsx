@@ -5,6 +5,7 @@ import {
   ArrowLeft,
   ArrowRight,
   Bookmark,
+  Check,
   CheckCircle2,
   ChevronLeft,
   ChevronRight,
@@ -101,6 +102,17 @@ type SubTool =
   | 'sig-visual'
   | 'sig-crypto'
   | 'redact-box';
+
+interface DraftTextBoxState {
+  bbox: [number, number, number, number];
+  text: string;
+  font: string;
+  size: number;
+  color: string;
+  bold: boolean;
+  italic: boolean;
+  align: 'left' | 'center' | 'right' | 'justify';
+}
 
 export default function App() {
   const [theme, setTheme] = useState<'dark' | 'light'>('dark');
@@ -233,6 +245,16 @@ export default function App() {
   const [docPropsForm, setDocPropsForm] = useState<Record<string, string>>({});
   const [showAboutModal, setShowAboutModal] = useState<boolean>(false);
   const [showRecoveryModal, setShowRecoveryModal] = useState<boolean>(false);
+
+  // Active Inline Text Box state
+  const [draftTextBox, setDraftTextBox] = useState<DraftTextBoxState | null>(null);
+  const draftTextAreaRef = useRef<HTMLTextAreaElement | null>(null);
+
+  // Active Hyperlink Creation Modal state
+  const [linkDraftModal, setLinkDraftModal] = useState<{
+    bbox: [number, number, number, number];
+    uri: string;
+  } | null>(null);
 
   // Password Unlock Modal state
   const [passwordPrompt, setPasswordPrompt] = useState<{
@@ -551,25 +573,78 @@ export default function App() {
   // Keyboard shortcuts & Native Electron Menu Actions
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
-      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
+      const isInput = document.activeElement?.tagName === 'INPUT' || document.activeElement?.tagName === 'TEXTAREA';
+      const key = e.key.toLowerCase();
+      const ctrl = e.ctrlKey || e.metaKey;
+
+      if (ctrl && key === 'k') {
         e.preventDefault();
         setShowCommandPalette((v) => !v);
-      } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z' && !e.shiftKey) {
-        if (document.activeElement?.tagName !== 'INPUT' && document.activeElement?.tagName !== 'TEXTAREA') {
+      } else if (e.key === 'F1') {
+        e.preventDefault();
+        setShowCommandPalette((v) => !v);
+      } else if (ctrl && key === 'n' && !isInput) {
+        e.preventDefault();
+        handleNewBlankDoc();
+      } else if (ctrl && key === 'o' && !isInput) {
+        e.preventDefault();
+        handleNativeOrBrowserOpen();
+      } else if (ctrl && key === 's') {
+        e.preventDefault();
+        handleSave(e.shiftKey);
+      } else if (ctrl && key === 'd' && !isInput) {
+        e.preventDefault();
+        openDocumentPropertiesModal();
+      } else if (ctrl && key === 'p') {
+        e.preventDefault();
+        if (window.vellumDesktop?.printDocument) window.vellumDesktop.printDocument();
+        else window.print();
+      } else if (ctrl && key === 'z' && !e.shiftKey) {
+        if (!isInput) {
           e.preventDefault();
           handleUndo();
         }
-      } else if ((e.ctrlKey || e.metaKey) && (e.key.toLowerCase() === 'y' || (e.shiftKey && e.key.toLowerCase() === 'z'))) {
-        if (document.activeElement?.tagName !== 'INPUT' && document.activeElement?.tagName !== 'TEXTAREA') {
+      } else if (ctrl && (key === 'y' || (e.shiftKey && key === 'z'))) {
+        if (!isInput) {
           e.preventDefault();
           handleRedo();
         }
-      } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') {
-        e.preventDefault();
-        handleSave(e.shiftKey);
-      } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'f') {
+      } else if (ctrl && key === 'f') {
         e.preventDefault();
         searchInputRef.current?.focus();
+      } else if (ctrl && key === 'e' && !isInput) {
+        e.preventDefault();
+        setMode('edit');
+      } else if (ctrl && (key === '=' || key === '+')) {
+        e.preventDefault();
+        setZoom((z) => Math.min(3.0, +(z + 0.2).toFixed(2)));
+      } else if (ctrl && key === '-') {
+        e.preventDefault();
+        setZoom((z) => Math.max(0.4, +(z - 0.2).toFixed(2)));
+      } else if (ctrl && key === '0') {
+        e.preventDefault();
+        setZoom(1.0);
+      } else if (e.key === 'F9') {
+        e.preventDefault();
+        setLeftOpen((v) => !v);
+      } else if (e.key === 'F10') {
+        e.preventDefault();
+        setRightOpen((v) => !v);
+      } else if (ctrl && e.shiftKey && key === 't') {
+        e.preventDefault();
+        setTheme((t) => (t === 'dark' ? 'light' : 'dark'));
+      } else if (ctrl && e.shiftKey && key === 'r') {
+        e.preventDefault();
+        if (activeDoc) {
+          pdfApi.rotatePages(activeDoc.doc_id, [currentPage], 90).then((s) => {
+            refreshDocState(activeDoc.doc_id, currentPage, s);
+          });
+        }
+      } else if (ctrl && key === 'w' && !isInput) {
+        if (activeDocId) {
+          e.preventDefault();
+          handleCloseTab(activeDocId);
+        }
       }
     };
     window.addEventListener('keydown', onKeyDown);
@@ -682,11 +757,14 @@ export default function App() {
           break;
         case 'close-tab':
           if (activeDocId) {
-            handleCloseDoc(activeDocId);
+            handleCloseTab(activeDocId);
           }
           break;
         case 'open-recovery':
           setShowRecoveryModal(true);
+          break;
+        case 'backend-diag':
+          setShowBackendDiag(true);
           break;
         case 'retry-backend':
           connectToBackend(true);
@@ -798,6 +876,58 @@ export default function App() {
     notify(`Inserted image ${file.name} onto Page ${currentPage + 1}`);
   };
 
+  const handleCommitDraftTextBox = async () => {
+    if (!activeDoc || !draftTextBox) return;
+    const trimmed = draftTextBox.text.trim();
+    if (!trimmed) {
+      setDraftTextBox(null);
+      return;
+    }
+    try {
+      const res = await pdfApi.addTextObject(activeDoc.doc_id, currentPage, {
+        text: draftTextBox.text,
+        bbox: draftTextBox.bbox,
+        font_name: draftTextBox.font,
+        font_size: draftTextBox.size,
+        color_hex: draftTextBox.color,
+        bold: draftTextBox.bold,
+        italic: draftTextBox.italic,
+        align: draftTextBox.align,
+      });
+      setDraftTextBox(null);
+      await refreshDocState(activeDoc.doc_id, currentPage, res.summary);
+      notify('Inserted text box into PDF content stream.');
+    } catch (err: any) {
+      notify(`Failed to insert text box: ${err?.message || err}`, 'warn');
+    }
+  };
+
+  const handleCancelDraftTextBox = () => {
+    setDraftTextBox(null);
+    notify('Text box insertion cancelled.');
+  };
+
+  const handleCommitLinkDraft = async () => {
+    if (!activeDoc || !linkDraftModal) return;
+    const uri = linkDraftModal.uri.trim();
+    if (!uri) {
+      setLinkDraftModal(null);
+      return;
+    }
+    try {
+      const res = await pdfApi.manageHyperlink(activeDoc.doc_id, currentPage, {
+        action: 'add',
+        bbox: linkDraftModal.bbox,
+        uri,
+      });
+      setLinkDraftModal(null);
+      await refreshDocState(activeDoc.doc_id, currentPage, res.summary);
+      notify(`Added hyperlink -> ${uri}`);
+    } catch (err: any) {
+      notify(`Failed to add hyperlink: ${err?.message || err}`, 'warn');
+    }
+  };
+
   // Interactive Canvas Rubber-Band / Freehand Mouse Handlers
   const toPdfCoords = (clientX: number, clientY: number, el: HTMLElement): [number, number] => {
     const rect = el.getBoundingClientRect();
@@ -851,18 +981,34 @@ export default function App() {
 
     try {
       if (subTool === 'add-text') {
-        const txt = window.prompt('Enter text for new PDF text block:', 'New PDF Text Block');
-        if (txt) {
-          const res = await pdfApi.addTextObject(activeDoc.doc_id, currentPage, {
-            text: txt,
-            bbox,
-            font_name: toolFontName,
-            font_size: toolFontSize,
-            color_hex: toolColor,
-          });
-          await refreshDocState(activeDoc.doc_id, currentPage, res.summary);
-          notify('Inserted new text object into PDF content stream.');
-        }
+        const dragW = x1 - x0;
+        const dragH = y1 - y0;
+        const boxWidth = dragW > 15 ? dragW : 180;
+        const boxHeight = dragH > 15 ? dragH : 56;
+        const finalBbox: [number, number, number, number] = [
+          x0,
+          y0,
+          +(Math.min(pageSizePt.width, x0 + boxWidth)).toFixed(1),
+          +(Math.min(pageSizePt.height, y0 + boxHeight)).toFixed(1),
+        ];
+        setDraftTextBox({
+          bbox: finalBbox,
+          text: '',
+          font: toolFontName || 'helv',
+          size: toolFontSize || 12,
+          color: toolColor || '#000000',
+          bold: false,
+          italic: false,
+          align: 'left',
+        });
+        setSubTool('select');
+        setSelectedSpan(null);
+        setSelectedImage(null);
+        setSelectedAnnot(null);
+        setSelectedField(null);
+        setTimeout(() => {
+          draftTextAreaRef.current?.focus();
+        }, 50);
       } else if (subTool.startsWith('shape-')) {
         const sType = subTool.replace('shape-', '');
         const shapeBox = sType === 'line' || sType === 'arrow' ? rawLineBox : bbox;
@@ -876,16 +1022,11 @@ export default function App() {
         await refreshDocState(activeDoc.doc_id, currentPage, res.summary);
         notify(`Added vector ${sType} to PDF content stream.`);
       } else if (subTool === 'add-link') {
-        const uri = window.prompt('Enter destination URL for hyperlink:', 'https://www.kernel.org');
-        if (uri) {
-          const res = await pdfApi.manageHyperlink(activeDoc.doc_id, currentPage, {
-            action: 'add',
-            bbox,
-            uri,
-          });
-          await refreshDocState(activeDoc.doc_id, currentPage, res.summary);
-          notify(`Added hyperlink -> ${uri}`);
-        }
+        setLinkDraftModal({
+          bbox,
+          uri: 'https://',
+        });
+        setSubTool('select');
       } else if (
         ['highlight', 'underline', 'strikeout', 'sticky_note', 'freetext', 'ink', 'stamp'].includes(subTool)
       ) {
@@ -1130,9 +1271,12 @@ export default function App() {
       {/* 1. TOP MENU BAR */}
       <header className="top-menubar" onClick={(e) => e.stopPropagation()}>
         <div className="menubar-left">
-          <div className="brand-badge">
-            <FileCheck size={15} />
-            <span>Vellum PDF Pro</span>
+          <div
+            className="brand-badge"
+            title="Vellum PDF Pro — Click for About & Licensing"
+            onClick={() => setShowAboutModal(true)}
+          >
+            <FileCheck size={16} />
           </div>
 
           {/* Menu: File */}
@@ -1177,6 +1321,12 @@ export default function App() {
                   <span>Print Document...</span>
                   <span className="kbd">Ctrl+P</span>
                 </button>
+                {activeDocId && (
+                  <button onClick={() => handleCloseTab(activeDocId)}>
+                    <span>Close Current Tab</span>
+                    <span className="kbd">Ctrl+W</span>
+                  </button>
+                )}
               </div>
             )}
           </div>
@@ -1380,7 +1530,22 @@ export default function App() {
               <div className="menu-dropdown" onClick={() => setOpenMenu(null)}>
                 <button onClick={() => setShowCommandPalette(true)}>
                   <span>Searchable Command Palette</span>
-                  <span className="kbd">Ctrl+K</span>
+                  <span className="kbd">Ctrl+K / F1</span>
+                </button>
+                <button
+                  onClick={async () => {
+                    const rec = await pdfApi.listRecovery();
+                    setRecoveryList(rec);
+                    setShowRecoveryModal(true);
+                  }}
+                >
+                  <span>Crash Recovery Manager ({recoveryList.length})</span>
+                </button>
+                <button onClick={() => setShowBackendDiag(true)}>
+                  <span>Backend Diagnostics & Logs</span>
+                </button>
+                <button onClick={() => connectToBackend(true)}>
+                  <span>Retry Backend Connection</span>
                 </button>
                 <button onClick={() => setShowAboutModal(true)}>
                   <span>About Vellum PDF Pro & Licensing</span>
@@ -2489,6 +2654,73 @@ export default function App() {
                     }}
                   />
                 )}
+
+                {/* Active Inline Text Box Overlay */}
+                {draftTextBox && (
+                  <div
+                    className="inline-textbox-overlay"
+                    style={{
+                      left: `${draftTextBox.bbox[0] * zoom}px`,
+                      top: `${draftTextBox.bbox[1] * zoom}px`,
+                      width: `${Math.max(120, (draftTextBox.bbox[2] - draftTextBox.bbox[0]) * zoom)}px`,
+                      height: `${Math.max(48, (draftTextBox.bbox[3] - draftTextBox.bbox[1]) * zoom)}px`,
+                    }}
+                    onClick={(e) => e.stopPropagation()}
+                    onMouseDown={(e) => e.stopPropagation()}
+                  >
+                    <div className="inline-textbox-toolbar">
+                      <button
+                        type="button"
+                        className="mini-btn apply"
+                        onClick={handleCommitDraftTextBox}
+                        title="Insert Text into PDF (Ctrl+Enter)"
+                      >
+                        <Check size={12} /> Insert
+                      </button>
+                      <button
+                        type="button"
+                        className="mini-btn cancel"
+                        onClick={handleCancelDraftTextBox}
+                        title="Cancel (Esc)"
+                      >
+                        <X size={12} /> Cancel
+                      </button>
+                      <span className="mini-hint">Ctrl+Enter to insert · Esc to cancel</span>
+                    </div>
+                    <textarea
+                      ref={draftTextAreaRef}
+                      className="inline-textbox-input"
+                      value={draftTextBox.text}
+                      placeholder="Type text directly on page..."
+                      onChange={(e) =>
+                        setDraftTextBox((prev) => (prev ? { ...prev, text: e.target.value } : null))
+                      }
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+                          e.preventDefault();
+                          handleCommitDraftTextBox();
+                        } else if (e.key === 'Escape') {
+                          e.preventDefault();
+                          handleCancelDraftTextBox();
+                        }
+                      }}
+                      style={{
+                        fontFamily:
+                          draftTextBox.font === 'tiro'
+                            ? 'serif'
+                            : draftTextBox.font === 'cour'
+                            ? 'monospace'
+                            : 'sans-serif',
+                        fontSize: `${Math.max(10, draftTextBox.size * zoom)}px`,
+                        color: draftTextBox.color,
+                        fontWeight: draftTextBox.bold ? 700 : 400,
+                        fontStyle: draftTextBox.italic ? 'italic' : 'normal',
+                        textAlign: draftTextBox.align,
+                      }}
+                      autoFocus
+                    />
+                  </div>
+                )}
               </div>
             </div>
           ) : (
@@ -2518,6 +2750,183 @@ export default function App() {
             </div>
 
             <div className="panel-scroll">
+              {/* NEW INLINE TEXT BOX INSPECTOR */}
+              {draftTextBox && (
+                <div className="inspector-section">
+                  <h4>
+                    <Type size={14} /> New Text Box Properties
+                  </h4>
+                  <div style={{ marginBottom: 8, fontSize: 11.5, color: 'var(--text-secondary)' }}>
+                    Adjust text, styling, and dimensions before inserting into the PDF stream.
+                  </div>
+                  <div className="form-group">
+                    <label>Text Content (Multiline)</label>
+                    <textarea
+                      rows={4}
+                      value={draftTextBox.text}
+                      onChange={(e) =>
+                        setDraftTextBox((prev) => (prev ? { ...prev, text: e.target.value } : null))
+                      }
+                      placeholder="Type text directly on page or here..."
+                    />
+                  </div>
+                  <div className="form-row">
+                    <div className="form-group">
+                      <label>Font Family</label>
+                      <select
+                        value={draftTextBox.font}
+                        onChange={(e) =>
+                          setDraftTextBox((prev) => (prev ? { ...prev, font: e.target.value } : null))
+                        }
+                      >
+                        <option value="helv">Helvetica (Sans)</option>
+                        <option value="tiro">Times Roman (Serif)</option>
+                        <option value="cour">Courier (Mono)</option>
+                        <option value="dejavu">DejaVu Sans (Unicode)</option>
+                      </select>
+                    </div>
+                    <div className="form-group">
+                      <label>Size (pt)</label>
+                      <input
+                        type="number"
+                        step="0.5"
+                        min="6"
+                        max="144"
+                        value={draftTextBox.size}
+                        onChange={(e) =>
+                          setDraftTextBox((prev) => (prev ? { ...prev, size: Number(e.target.value) } : null))
+                        }
+                      />
+                    </div>
+                  </div>
+                  <div className="form-row">
+                    <div className="form-group">
+                      <label>Color</label>
+                      <input
+                        type="color"
+                        value={draftTextBox.color}
+                        onChange={(e) =>
+                          setDraftTextBox((prev) => (prev ? { ...prev, color: e.target.value } : null))
+                        }
+                        style={{ height: 30, width: '100%' }}
+                      />
+                    </div>
+                    <div className="form-group">
+                      <label>Alignment</label>
+                      <select
+                        value={draftTextBox.align}
+                        onChange={(e) =>
+                          setDraftTextBox((prev) => (prev ? { ...prev, align: e.target.value as any } : null))
+                        }
+                      >
+                        <option value="left">Left</option>
+                        <option value="center">Center</option>
+                        <option value="right">Right</option>
+                        <option value="justify">Justify</option>
+                      </select>
+                    </div>
+                  </div>
+                  <div className="form-row">
+                    <label style={{ display: 'flex', alignItems: 'center', gap: 5, fontSize: 12 }}>
+                      <input
+                        type="checkbox"
+                        checked={draftTextBox.bold}
+                        onChange={(e) =>
+                          setDraftTextBox((prev) => (prev ? { ...prev, bold: e.target.checked } : null))
+                        }
+                      />
+                      Bold
+                    </label>
+                    <label style={{ display: 'flex', alignItems: 'center', gap: 5, fontSize: 12 }}>
+                      <input
+                        type="checkbox"
+                        checked={draftTextBox.italic}
+                        onChange={(e) =>
+                          setDraftTextBox((prev) => (prev ? { ...prev, italic: e.target.checked } : null))
+                        }
+                      />
+                      Italic
+                    </label>
+                  </div>
+                  <div className="form-row">
+                    <div className="form-group">
+                      <label>X0 (pt)</label>
+                      <input
+                        type="number"
+                        value={Math.round(draftTextBox.bbox[0])}
+                        onChange={(e) => {
+                          const nx = Number(e.target.value);
+                          const w = draftTextBox.bbox[2] - draftTextBox.bbox[0];
+                          setDraftTextBox((prev) =>
+                            prev ? { ...prev, bbox: [nx, prev.bbox[1], +(nx + w).toFixed(1), prev.bbox[3]] } : null
+                          );
+                        }}
+                      />
+                    </div>
+                    <div className="form-group">
+                      <label>Y0 (pt)</label>
+                      <input
+                        type="number"
+                        value={Math.round(draftTextBox.bbox[1])}
+                        onChange={(e) => {
+                          const ny = Number(e.target.value);
+                          const h = draftTextBox.bbox[3] - draftTextBox.bbox[1];
+                          setDraftTextBox((prev) =>
+                            prev ? { ...prev, bbox: [prev.bbox[0], ny, prev.bbox[2], +(ny + h).toFixed(1)] } : null
+                          );
+                        }}
+                      />
+                    </div>
+                  </div>
+                  <div className="form-row">
+                    <div className="form-group">
+                      <label>Width (pt)</label>
+                      <input
+                        type="number"
+                        min="20"
+                        value={Math.round(draftTextBox.bbox[2] - draftTextBox.bbox[0])}
+                        onChange={(e) => {
+                          const nw = Math.max(20, Number(e.target.value));
+                          setDraftTextBox((prev) =>
+                            prev ? { ...prev, bbox: [prev.bbox[0], prev.bbox[1], +(prev.bbox[0] + nw).toFixed(1), prev.bbox[3]] } : null
+                          );
+                        }}
+                      />
+                    </div>
+                    <div className="form-group">
+                      <label>Height (pt)</label>
+                      <input
+                        type="number"
+                        min="16"
+                        value={Math.round(draftTextBox.bbox[3] - draftTextBox.bbox[1])}
+                        onChange={(e) => {
+                          const nh = Math.max(16, Number(e.target.value));
+                          setDraftTextBox((prev) =>
+                            prev ? { ...prev, bbox: [prev.bbox[0], prev.bbox[1], prev.bbox[2], +(prev.bbox[1] + nh).toFixed(1)] } : null
+                          );
+                        }}
+                      />
+                    </div>
+                  </div>
+                  <div style={{ display: 'flex', gap: 6, marginTop: 10 }}>
+                    <button
+                      className="tool-btn primary"
+                      style={{ flex: 1 }}
+                      onClick={handleCommitDraftTextBox}
+                    >
+                      <Check size={14} /> Insert into PDF
+                    </button>
+                    <button
+                      className="tool-btn"
+                      onClick={handleCancelDraftTextBox}
+                      title="Cancel and discard text box"
+                    >
+                      <X size={14} /> Cancel
+                    </button>
+                  </div>
+                </div>
+              )}
+
               {/* DIRECT TEXT SPAN INSPECTOR */}
               {selectedSpan && (
                 <div className="inspector-section">
@@ -3325,6 +3734,51 @@ export default function App() {
                     {cmd.shortcut && <span className="badge pass">{cmd.shortcut}</span>}
                   </button>
                 ))}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL: ADD HYPERLINK */}
+      {linkDraftModal && (
+        <div className="modal-backdrop" onClick={() => setLinkDraftModal(null)}>
+          <div className="modal-card" onClick={(e) => e.stopPropagation()} style={{ width: 440 }}>
+            <div className="modal-header">
+              <span style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <LinkIcon size={16} color="var(--primary)" />
+                Add Hyperlink to Selection
+              </span>
+              <button className="tab-close" onClick={() => setLinkDraftModal(null)}>
+                <X size={16} />
+              </button>
+            </div>
+            <div className="modal-body">
+              <p style={{ fontSize: 12, marginBottom: 10, color: 'var(--text-secondary)' }}>
+                Target Area: [{linkDraftModal.bbox.map(Math.round).join(', ')}] pt on Page {currentPage + 1}
+              </p>
+              <div className="form-group">
+                <label>Destination Web URL or URI</label>
+                <input
+                  type="url"
+                  autoFocus
+                  value={linkDraftModal.uri}
+                  onChange={(e) => setLinkDraftModal({ ...linkDraftModal, uri: e.target.value })}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') handleCommitLinkDraft();
+                    else if (e.key === 'Escape') setLinkDraftModal(null);
+                  }}
+                  placeholder="https://example.com"
+                  style={{ width: '100%', fontSize: 13, padding: '7px 10px' }}
+                />
+              </div>
+              <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 14 }}>
+                <button className="tool-btn" onClick={() => setLinkDraftModal(null)}>
+                  Cancel
+                </button>
+                <button className="tool-btn primary" onClick={handleCommitLinkDraft}>
+                  Insert Hyperlink
+                </button>
               </div>
             </div>
           </div>
