@@ -5,6 +5,24 @@ The project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html
 
 ---
 
+## [1.0.0-beta.2] — 2026-11-10
+
+### Fixed
+- **Backend Startup Race Condition**:
+  - Resolved `"Backend initialization warning: Failed to fetch"` and permanent `"Engine: Connecting..."` hang during cold application launch.
+  - Extended Electron health polling timeout from 8 seconds to 45 seconds to accommodate cold-mount Squashfs module decompression.
+  - Implemented 60-attempt frontend auto-retry loop with live connection status progress and interactive "Retry" / "Diagnostics" buttons.
+- **Dynamic Port Selection & Multi-Instance Isolation**:
+  - Implemented dynamic loopback port allocation (`isPortAvailable` / `findFreePort`) in Electron. Multiple running Vellum instances now allocate separate ports without port collisions or address conflicts.
+- **Process Lifecycle & Orphan Prevention**:
+  - Added Linux kernel `PR_SET_PDEATHSIG` parent-death signal monitoring in Python backend. If the parent process exits for any reason, the backend terminates immediately.
+  - Multi-tier process termination with `SIGTERM` and `SIGKILL` watchdog in Electron.
+- **Packaging Portability & CI Pipeline**:
+  - Fixed `scripts/build_packages.sh` to dynamically resolve Python environments and runtime libraries (`PYTHON_BASE_PREFIX`, `PYTHON_PURELIB`).
+  - Added automatic on-demand AppImage Type-2 runtime discovery and curl fallback for non-cached build environments.
+  - Resolved tmpfs ramdisk quota exhaustion using hardlink payload staging and phased intermediate directory cleanup.
+  - Added automated backend lifecycle and port isolation regression test suite (`tests/test_backend_startup_lifecycle.py`).
+
 ## [1.0.0-beta.1] — 2026-11-10
 
 ### Initial Public Beta Release

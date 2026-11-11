@@ -433,22 +433,39 @@ class PdfARequest(BaseModel):
 # --- Endpoints ---
 
 
-@app.get("/api/health")
-def get_health() -> Dict[str, Any]:
-    import importlib.metadata as _meta
+_CACHED_LIBRARIES: Optional[Dict[str, Any]] = None
 
-    return {
-        "status": "ok",
-        "engine": "Vellum PDF Pro Hybrid Engine",
-        "libraries": {
-            "pymupdf": _meta.version("pymupdf"),
-            "pikepdf": _meta.version("pikepdf"),
-            "pyhanko": _meta.version("pyhanko"),
-            "pdfplumber": _meta.version("pdfplumber"),
+
+def _get_library_metadata() -> Dict[str, Any]:
+    global _CACHED_LIBRARIES
+    if _CACHED_LIBRARIES is None:
+        import importlib.metadata as _meta
+
+        def _safe_version(pkg: str) -> str:
+            try:
+                return _meta.version(pkg)
+            except Exception:
+                return "installed"
+
+        _CACHED_LIBRARIES = {
+            "pymupdf": _safe_version("pymupdf"),
+            "pikepdf": _safe_version("pikepdf"),
+            "pyhanko": _safe_version("pyhanko"),
+            "pdfplumber": _safe_version("pdfplumber"),
             "libreoffice": shutil.which("libreoffice") is not None,
             "ghostscript": shutil.which("gs") is not None,
             "rapidocr_offline": True,
-        },
+        }
+    return _CACHED_LIBRARIES
+
+
+@app.get("/api/health")
+@app.get("/health")
+def get_health() -> Dict[str, Any]:
+    return {
+        "status": "ok",
+        "engine": "Vellum PDF Pro Hybrid Engine",
+        "libraries": _get_library_metadata(),
         "open_sessions": len(session_manager.sessions),
     }
 
@@ -1671,7 +1688,22 @@ def api_convert_pdfa(doc_id: str, req: PdfARequest) -> Dict[str, Any]:
 
 
 if __name__ == "__main__":
+    import argparse
+    import signal
     import uvicorn
 
-    port = int(os.environ.get("VELLUM_PORT", "18420"))
-    uvicorn.run(app, host="127.0.0.1", port=port, log_level="warning")
+    # Ensure backend terminates if parent process (Electron) exits on Linux
+    try:
+        import ctypes
+        libc = ctypes.CDLL("libc.so.6")
+        PR_SET_PDEATHSIG = 1
+        libc.prctl(PR_SET_PDEATHSIG, signal.SIGTERM)
+    except Exception:
+        pass
+
+    parser = argparse.ArgumentParser(description="Vellum PDF Pro Backend Engine")
+    parser.add_argument("--port", type=int, default=int(os.environ.get("VELLUM_PORT", "18420")))
+    parser.add_argument("--host", type=str, default="127.0.0.1")
+    args, _ = parser.parse_known_args()
+
+    uvicorn.run(app, host=args.host, port=args.port, log_level="warning")

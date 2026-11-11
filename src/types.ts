@@ -228,6 +228,17 @@ declare global {
       isDesktopApp: boolean;
       platform: string;
       getBackendUrl: () => Promise<string>;
+      getBackendStatus: () => Promise<{
+        started: boolean;
+        ready: boolean;
+        port: number;
+        url: string;
+        pid: number | null;
+        exitCode: number | null;
+        error: string | null;
+        logs: string[];
+      }>;
+      restartBackend: () => Promise<{ ready: boolean; url: string }>;
       openFileDialog: () => Promise<string | null>;
       saveFileDialog: (defaultFilename?: string) => Promise<string | null>;
       printDocument: () => Promise<{ printed: boolean }>;

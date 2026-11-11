@@ -15,8 +15,17 @@ mkdir -p "$RELEASE_DIR"
 echo "[1/6] Building production frontend bundle..."
 npm run build
 
-echo "[2/6] Generating application icon..."
-"$ROOT_DIR/.venv/bin/python" - <<'PY' "$BUILD_TMP/vellum-pdf-pro.png"
+echo "[2/6] Detecting Python runtime environment and generating application icon..."
+if [ -x "$ROOT_DIR/.venv/bin/python" ]; then
+  PYTHON_EXEC="$ROOT_DIR/.venv/bin/python"
+elif command -v python3 >/dev/null 2>&1; then
+  PYTHON_EXEC="$(command -v python3)"
+else
+  PYTHON_EXEC="python"
+fi
+echo "Using Python executable: $PYTHON_EXEC"
+
+"$PYTHON_EXEC" - <<'PY' "$BUILD_TMP/vellum-pdf-pro.png"
 import sys
 from PIL import Image, ImageDraw
 
@@ -47,12 +56,23 @@ cp -r "$ROOT_DIR/backend" "$APP_STAGE/app/"
 cp "$ROOT_DIR/package.json" "$APP_STAGE/app/"
 
 # 3. Python 3.11 Runtime & Complete Site-Packages Engine
-echo " -> Bundling standalone Python 3.11 runtime..."
-cp -r /home/zk/.local/share/uv/python/cpython-3.11.15-linux-x86_64-gnu/* "$APP_STAGE/python/"
+PYTHON_BASE_PREFIX="$("$PYTHON_EXEC" -c "import sys; print(sys.base_prefix)")"
+PYTHON_PURELIB="$("$PYTHON_EXEC" -c "import sysconfig; print(sysconfig.get_path('purelib'))")"
 
-echo " -> Bundling all Python dependencies (PyMuPDF, pikepdf, pyHanko, pdf2docx, FastAPI, RapidOCR)..."
+echo " -> Bundling standalone Python runtime from $PYTHON_BASE_PREFIX..."
+cp -r "$PYTHON_BASE_PREFIX"/* "$APP_STAGE/python/"
+
+echo " -> Bundling all Python dependencies from $PYTHON_PURELIB..."
 mkdir -p "$APP_STAGE/python/lib/python3.11/site-packages"
-cp -r "$ROOT_DIR/.venv/lib/python3.11/site-packages/"* "$APP_STAGE/python/lib/python3.11/site-packages/"
+cp -r "$PYTHON_PURELIB"/* "$APP_STAGE/python/lib/python3.11/site-packages/"
+
+if [ ! -f "$APP_STAGE/python/bin/python3.11" ]; then
+  if [ -f "$APP_STAGE/python/bin/python3" ]; then
+    ln -sf python3 "$APP_STAGE/python/bin/python3.11"
+  elif [ -f "$APP_STAGE/python/bin/python" ]; then
+    ln -sf python "$APP_STAGE/python/bin/python3.11"
+  fi
+fi
 
 # Clean cache files to optimize package size
 find "$APP_STAGE" -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
@@ -80,6 +100,7 @@ fi
 export VELLUM_PORT="${VELLUM_PORT:-18420}"
 export VELLUM_PYTHON="$BASE/python/bin/python3.11"
 export PYTHONPATH="$BASE/app:$BASE/python/lib/python3.11/site-packages:${PYTHONPATH:-}"
+export LD_LIBRARY_PATH="$BASE/python/lib:${LD_LIBRARY_PATH:-}"
 export ELECTRON_RUN_AS_NODE=""
 
 ELECTRON_BIN="$BASE/electron/electron"
@@ -112,7 +133,7 @@ mkdir -p "$DEB_ROOT/usr/bin"
 mkdir -p "$DEB_ROOT/usr/share/applications"
 mkdir -p "$DEB_ROOT/usr/share/icons/hicolor/256x256/apps"
 
-cp -r "$APP_STAGE/"* "$DEB_ROOT/opt/vellum-pdf-pro/payload/"
+cp -al "$APP_STAGE/"* "$DEB_ROOT/opt/vellum-pdf-pro/payload/"
 cp "$BUILD_TMP/vellum-launcher.sh" "$DEB_ROOT/usr/bin/vellum-pdf-pro"
 cp "$BUILD_TMP/vellum-pdf-pro.desktop" "$DEB_ROOT/usr/share/applications/vellum-pdf-pro.desktop"
 cp "$BUILD_TMP/vellum-pdf-pro.png" "$DEB_ROOT/usr/share/icons/hicolor/256x256/apps/vellum-pdf-pro.png"
@@ -137,12 +158,13 @@ EOF
 
 DEB_OUT="$RELEASE_DIR/vellum-pdf-pro_${VERSION}_amd64.deb"
 dpkg-deb -Zzstd -z1 --root-owner-group --build "$DEB_ROOT" "$DEB_OUT"
+rm -rf "$DEB_ROOT"
 
 echo "[5/6] Building Linux AppImage (.AppImage)..."
 APPDIR="$BUILD_TMP/Vellum_PDF_Pro.AppDir"
 mkdir -p "$APPDIR/usr/bin"
 mkdir -p "$APPDIR/usr/lib/vellum-pdf-pro"
-cp -r "$APP_STAGE/"* "$APPDIR/usr/lib/vellum-pdf-pro/"
+cp -al "$APP_STAGE/"* "$APPDIR/usr/lib/vellum-pdf-pro/"
 
 # AppRun script in AppImage root
 cat > "$APPDIR/AppRun" << 'EOF'
@@ -154,6 +176,7 @@ BASE="$APPDIR/usr/lib/vellum-pdf-pro"
 export VELLUM_PORT="${VELLUM_PORT:-18420}"
 export VELLUM_PYTHON="$BASE/python/bin/python3.11"
 export PYTHONPATH="$BASE/app:$BASE/python/lib/python3.11/site-packages:${PYTHONPATH:-}"
+export LD_LIBRARY_PATH="$BASE/python/lib:${LD_LIBRARY_PATH:-}"
 export ELECTRON_RUN_AS_NODE=""
 
 exec "$BASE/electron/electron" --no-sandbox "$BASE/app/electron/main.cjs" "$@"
@@ -163,13 +186,42 @@ cp "$BUILD_TMP/vellum-pdf-pro.desktop" "$APPDIR/vellum-pdf-pro.desktop"
 cp "$BUILD_TMP/vellum-pdf-pro.png" "$APPDIR/vellum-pdf-pro.png"
 ln -sf usr/lib/vellum-pdf-pro/app/electron "$APPDIR/electron"
 
-RUNTIME_BIN="/home/zk/.cache/electron-builder/appimage-12.0.1/appimage-12.0.1-qkv17/runtime-x64"
+RUNTIME_BIN=""
+for candidate in \
+  "$HOME/.cache/electron-builder/appimage-12.0.1/appimage-12.0.1-qkv17/runtime-x64" \
+  "$HOME/.cache/electron-builder/appimage/appimage-12.0.1/runtime-x64" \
+  /home/*/.cache/electron-builder/appimage*/runtime-x64 \
+  /home/*/.cache/electron-builder/appimage*/*/runtime-x64; do
+  if [ -f "$candidate" ]; then
+    RUNTIME_BIN="$candidate"
+    break
+  fi
+done
+
+if [ -z "$RUNTIME_BIN" ]; then
+  CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/electron-builder/appimage-12.0.1"
+  mkdir -p "$CACHE_DIR"
+  RUNTIME_BIN="$CACHE_DIR/runtime-x64"
+  if [ ! -f "$RUNTIME_BIN" ]; then
+    echo " -> Downloading AppImage runtime (Type-2)..."
+    curl -fsSL -o "$RUNTIME_BIN" "https://github.com/AppImage/AppImageKit/releases/download/continuous/runtime-x86_64"
+    chmod +x "$RUNTIME_BIN"
+  fi
+fi
+
 SQUASHFS_IMG="$BUILD_TMP/appdir.squashfs"
-mksquashfs "$APPDIR" "$SQUASHFS_IMG" -comp zstd -Xcompression-level 1 -root-owned -noappend -quiet
+mksquashfs "$APPDIR" "$SQUASHFS_IMG" -comp gzip -root-owned -noappend -quiet
 
 APPIMAGE_OUT="$RELEASE_DIR/Vellum_PDF_Pro-${VERSION}-x86_64.AppImage"
 cat "$RUNTIME_BIN" "$SQUASHFS_IMG" > "$APPIMAGE_OUT"
 chmod +x "$APPIMAGE_OUT"
+rm -rf "$APPDIR" "$SQUASHFS_IMG"
+
+echo " -> Generating SHA-256 checksums..."
+cd "$RELEASE_DIR"
+sha256sum "vellum-pdf-pro_${VERSION}_amd64.deb" "Vellum_PDF_Pro-${VERSION}-x86_64.AppImage" > SHA256SUMS
+cd "$ROOT_DIR"
 
 echo "[6/6] Build complete!"
-ls -lh "$DEB_OUT" "$APPIMAGE_OUT"
+ls -lh "$DEB_OUT" "$APPIMAGE_OUT" "$RELEASE_DIR/SHA256SUMS"
+cat "$RELEASE_DIR/SHA256SUMS"

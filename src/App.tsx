@@ -58,7 +58,7 @@ import {
   ZoomIn,
   ZoomOut,
 } from 'lucide-react';
-import { getApiBaseUrl, initApiBaseUrl, pdfApi } from './api';
+import { checkBackendHealth, getApiBaseUrl, getDesktopBackendStatus, initApiBaseUrl, pdfApi } from './api';
 import {
   AnnotationItem,
   AttachmentItem,
@@ -105,6 +105,11 @@ type SubTool =
 export default function App() {
   const [theme, setTheme] = useState<'dark' | 'light'>('dark');
   const [engineReady, setEngineReady] = useState<boolean>(false);
+  const [engineState, setEngineState] = useState<'connecting' | 'ready' | 'error'>('connecting');
+  const [connectionAttempt, setConnectionAttempt] = useState<number>(1);
+  const [backendErrorDetail, setBackendErrorDetail] = useState<string | null>(null);
+  const [backendLogs, setBackendLogs] = useState<string[]>([]);
+  const [showBackendDiag, setShowBackendDiag] = useState<boolean>(false);
   const [openDocs, setOpenDocs] = useState<DocumentSummary[]>([]);
   const [activeDocId, setActiveDocId] = useState<string | null>(null);
   const [currentPage, setCurrentPage] = useState<number>(0);
@@ -303,15 +308,40 @@ export default function App() {
     [zoom, notify]
   );
 
-  // Initialize backend connection & open showcase document on first startup
-  useEffect(() => {
-    let mounted = true;
-    (async () => {
-      await initApiBaseUrl();
+  // Initialize backend connection & open showcase document on startup with auto-retry
+  const connectToBackend = useCallback(async (isManualRetry = false) => {
+    setEngineState('connecting');
+    setBackendErrorDetail(null);
+    if (isManualRetry) {
+      notify('Attempting to connect to Vellum backend...', 'info');
+    }
+    await initApiBaseUrl();
+
+    const maxAttempts = 60; // 30 seconds total
+    let healthy = false;
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      setConnectionAttempt(attempt);
       try {
-        await pdfApi.getHealth();
-        if (!mounted) return;
-        setEngineReady(true);
+        const ok = await checkBackendHealth(1200);
+        if (ok) {
+          healthy = true;
+          break;
+        }
+      } catch {
+        // continue polling
+      }
+      await new Promise((r) => setTimeout(r, 500));
+    }
+
+    if (healthy) {
+      setEngineReady(true);
+      setEngineState('ready');
+      setBackendErrorDetail(null);
+      if (isManualRetry) {
+        notify('Connected to Vellum engine!', 'info');
+      }
+      try {
         const existing = await pdfApi.listOpenDocs();
         if (existing.length > 0) {
           setOpenDocs(existing);
@@ -319,21 +349,32 @@ export default function App() {
           await refreshDocState(existing[0].doc_id, 0, existing[0]);
         } else {
           const sample = await pdfApi.openSampleDoc();
-          if (!mounted) return;
           setOpenDocs([sample]);
           setActiveDocId(sample.doc_id);
           await refreshDocState(sample.doc_id, 0, sample);
         }
         const rec = await pdfApi.listRecovery();
-        if (mounted) setRecoveryList(rec);
-      } catch (err: any) {
-        if (mounted) notify(`Backend initialization warning: ${err.message}`, 'warn');
+        setRecoveryList(rec);
+      } catch (docErr: any) {
+        notify(`Failed to load initial document: ${docErr.message}`, 'error');
       }
-    })();
-    return () => {
-      mounted = false;
-    };
-  }, []);
+    } else {
+      setEngineReady(false);
+      setEngineState('error');
+      const diag = await getDesktopBackendStatus();
+      if (diag && diag.error) {
+        setBackendErrorDetail(diag.error);
+        if (diag.logs) setBackendLogs(diag.logs);
+      } else {
+        setBackendErrorDetail(`Unable to reach backend at ${getApiBaseUrl()}/api/health after ${maxAttempts} attempts.`);
+      }
+      notify('Backend connection could not be established. Click Retry in the status bar.', 'error');
+    }
+  }, [notify, refreshDocState]);
+
+  useEffect(() => {
+    connectToBackend(false);
+  }, [connectToBackend]);
 
   // Re-render current page when activeDocId, currentPage, or zoom changes
   useEffect(() => {
@@ -646,6 +687,16 @@ export default function App() {
           break;
         case 'open-recovery':
           setShowRecoveryModal(true);
+          break;
+        case 'retry-backend':
+          connectToBackend(true);
+          break;
+        case 'backend-error':
+          if (payload.error) {
+            setBackendErrorDetail(payload.error);
+            if (payload.logs) setBackendLogs(payload.logs);
+            setEngineState('error');
+          }
           break;
         case 'about':
           setShowAboutModal(true);
@@ -3160,9 +3211,59 @@ export default function App() {
         <div className="status-group">
           <span>
             Engine:{' '}
-            <strong style={{ color: engineReady ? 'var(--success)' : 'var(--warning)' }}>
-              {engineReady ? 'PyMuPDF + pikepdf + pyHanko + RapidOCR Ready (Offline)' : 'Connecting...'}
-            </strong>
+            {engineState === 'ready' && (
+              <strong style={{ color: 'var(--success, #10b981)' }}>
+                PyMuPDF + pikepdf + pyHanko + RapidOCR Ready (Offline)
+              </strong>
+            )}
+            {engineState === 'connecting' && (
+              <strong style={{ color: 'var(--warning, #f59e0b)' }}>
+                Connecting... ({connectionAttempt}/60)
+              </strong>
+            )}
+            {engineState === 'error' && (
+              <span style={{ display: 'inline-flex', alignItems: 'center', gap: '8px' }}>
+                <strong style={{ color: 'var(--danger, #ef4444)' }}>
+                  Connection Failed
+                </strong>
+                <button
+                  type="button"
+                  style={{
+                    padding: '1px 8px',
+                    fontSize: '11px',
+                    borderRadius: '4px',
+                    background: '#3b82f6',
+                    color: '#ffffff',
+                    border: 'none',
+                    cursor: 'pointer',
+                  }}
+                  onClick={() => connectToBackend(true)}
+                  title="Retry connecting to Python backend"
+                >
+                  Retry
+                </button>
+                <button
+                  type="button"
+                  style={{
+                    padding: '1px 8px',
+                    fontSize: '11px',
+                    borderRadius: '4px',
+                    background: '#374151',
+                    color: '#ffffff',
+                    border: 'none',
+                    cursor: 'pointer',
+                  }}
+                  onClick={async () => {
+                    const status = await getDesktopBackendStatus();
+                    if (status?.logs) setBackendLogs(status.logs);
+                    setShowBackendDiag(true);
+                  }}
+                  title="View backend diagnostic logs"
+                >
+                  Diagnostics
+                </button>
+              </span>
+            )}
           </span>
           {activeDoc && (
             <>
@@ -3416,6 +3517,90 @@ export default function App() {
                 <strong>Engines:</strong> PyMuPDF (AGPL-3.0), pikepdf/QPDF (MPL-2.0), pyHanko (MIT),
                 RapidOCR/ONNXRuntime (Apache-2.0), pdfplumber (MIT), LibreOffice & Ghostscript.
               </p>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL: BACKEND DIAGNOSTICS */}
+      {showBackendDiag && (
+        <div className="modal-backdrop" onClick={() => setShowBackendDiag(false)}>
+          <div className="modal-card" onClick={(e) => e.stopPropagation()} style={{ width: 620, maxHeight: '80vh' }}>
+            <div className="modal-header">
+              <span style={{ fontWeight: 600 }}>Backend Engine Diagnostics & Logs</span>
+              <button className="tab-close" onClick={() => setShowBackendDiag(false)}>
+                <X size={16} />
+              </button>
+            </div>
+            <div className="modal-body" style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+              <div>
+                <strong>Backend URL:</strong> <code>{getApiBaseUrl()}</code>
+              </div>
+              <div>
+                <strong>Status:</strong>{' '}
+                <span style={{ color: engineState === 'ready' ? '#10b981' : '#ef4444', fontWeight: 600 }}>
+                  {engineState.toUpperCase()}
+                </span>
+              </div>
+              {backendErrorDetail && (
+                <div style={{ background: '#451a1a', border: '1px solid #7f1d1d', borderRadius: 6, padding: '8px 12px', color: '#fca5a5', fontSize: 12 }}>
+                  <strong>Diagnostic Detail:</strong> {backendErrorDetail}
+                </div>
+              )}
+              <div>
+                <strong style={{ fontSize: 12 }}>Recent Process Logs:</strong>
+                <pre
+                  style={{
+                    background: '#090d16',
+                    border: '1px solid #1e293b',
+                    borderRadius: 6,
+                    padding: 8,
+                    fontSize: 11,
+                    maxHeight: 240,
+                    overflowY: 'auto',
+                    whiteSpace: 'pre-wrap',
+                    color: '#94a3b8',
+                    marginTop: 4,
+                  }}
+                >
+                  {backendLogs.length > 0 ? backendLogs.join('\n') : 'No backend log events captured yet.'}
+                </pre>
+              </div>
+              <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 8 }}>
+                <button
+                  type="button"
+                  className="btn btn-secondary"
+                  onClick={async () => {
+                    const status = await getDesktopBackendStatus();
+                    if (status?.logs) setBackendLogs(status.logs);
+                  }}
+                >
+                  Refresh Logs
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-secondary"
+                  onClick={async () => {
+                    if (window.vellumDesktop?.restartBackend) {
+                      notify('Restarting backend process...', 'info');
+                      await window.vellumDesktop.restartBackend();
+                    }
+                    connectToBackend(true);
+                  }}
+                >
+                  Restart Backend Process
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-primary"
+                  onClick={() => {
+                    setShowBackendDiag(false);
+                    connectToBackend(true);
+                  }}
+                >
+                  Retry Connection
+                </button>
+              </div>
             </div>
           </div>
         </div>

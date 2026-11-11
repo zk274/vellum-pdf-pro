@@ -30,6 +30,31 @@ export function getApiBaseUrl(): string {
   return resolvedBaseUrl;
 }
 
+export async function checkBackendHealth(timeoutMs = 1500): Promise<boolean> {
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    const res = await fetch(`${resolvedBaseUrl}/api/health`, {
+      signal: controller.signal,
+    });
+    clearTimeout(timer);
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+export async function getDesktopBackendStatus(): Promise<any> {
+  if (window.vellumDesktop?.getBackendStatus) {
+    try {
+      return await window.vellumDesktop.getBackendStatus();
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
 async function requestJson<T>(path: string, options?: RequestInit): Promise<T> {
   const res = await fetch(`${resolvedBaseUrl}${path}`, {
     ...options,
