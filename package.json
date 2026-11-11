@@ -1,0 +1,30 @@
+{
+  "name": "vellum-pdf-pro",
+  "version": "1.0.0",
+  "description": "Professional Linux Desktop PDF Editor comparable to Adobe Acrobat Pro",
+  "author": "Vellum PDF Engineering <engineering@vellumpdf.linux>",
+  "license": "AGPL-3.0-only",
+  "main": "electron/main.cjs",
+  "homepage": "./",
+  "scripts": {
+    "dev:backend": ".venv/bin/python -m backend.app",
+    "dev:frontend": "vite --port 5173",
+    "build": "vite build",
+    "electron:start": "electron .",
+    "test:backend": ".venv/bin/pytest -v",
+    "package:linux": "bash scripts/build_packages.sh"
+  },
+  "dependencies": {
+    "lucide-react": "^0.577.0",
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7"
+  },
+  "devDependencies": {
+    "@types/react": "19.2.18",
+    "@types/react-dom": "19.2.3",
+    "@vitejs/plugin-react": "^4.3.4",
+    "electron": "43.4.1",
+    "typescript": "^5.9.2",
+    "vite": "^6.3.2"
+  }
+}

@@ -1,0 +1,64 @@
+name: CI & Linux Package Build
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  test-and-package:
+    name: Automated Tests & Linux Package Build
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Set up Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: Install System Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            tesseract-ocr \
+            libreoffice-core \
+            squashfs-tools \
+            libgtk-3-0t64 \
+            libnss3 \
+            libasound2t64
+
+      - name: Install Python Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Install Node Dependencies
+        run: npm ci
+
+      - name: Run Backend Engine Automated Tests
+        run: pytest -v
+
+      - name: Build Production Frontend
+        run: npm run build
+
+      - name: Build Linux Distribution Packages (.deb & .AppImage)
+        run: bash scripts/build_packages.sh
+
+      - name: Upload Packaging Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: vellum-linux-packages
+          path: release/
+          if-no-files-found: error

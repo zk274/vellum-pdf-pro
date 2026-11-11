@@ -1,0 +1,238 @@
+export type EditorMode =
+  | 'view'
+  | 'edit'
+  | 'annotate'
+  | 'pages'
+  | 'forms'
+  | 'sign'
+  | 'ocr'
+  | 'security'
+  | 'pro';
+
+export type LeftSidebarTab = 'thumbnails' | 'bookmarks' | 'comments' | 'attachments' | 'fonts';
+
+export interface PageInfo {
+  page_index: number;
+  page_number: number;
+  width_pt: number;
+  height_pt: number;
+  width_mm: number;
+  height_mm: number;
+  rotation: number;
+}
+
+export interface DocumentSummary {
+  doc_id: string;
+  filename: string;
+  file_path: string | null;
+  page_count: number;
+  pages: PageInfo[];
+  metadata: Record<string, string>;
+  bookmarks_count: number;
+  is_encrypted: boolean;
+  dirty: boolean;
+  size_bytes: number;
+  sha256: string;
+  can_undo: boolean;
+  can_redo: boolean;
+  undo_count: number;
+  redo_count: number;
+  last_action: string | null;
+  updated_at: string;
+}
+
+export interface ThumbnailItem {
+  page_index: number;
+  page_number: number;
+  width_pt: number;
+  height_pt: number;
+  rotation: number;
+  image_base64: string;
+}
+
+export interface TextSpanObject {
+  id: string;
+  block_index: number;
+  line_index: number;
+  span_index: number;
+  text: string;
+  bbox: [number, number, number, number];
+  origin: [number, number];
+  font: string;
+  family: 'sans' | 'serif' | 'mono';
+  size: number;
+  color: string;
+  bold: boolean;
+  italic: boolean;
+  is_subset_font: boolean;
+  can_edit_losslessly: boolean;
+}
+
+export interface ImageObject {
+  id: string;
+  image_index: number;
+  xref: number;
+  bbox: [number, number, number, number];
+  width: number;
+  height: number;
+  colorspace: string;
+  bpc: number;
+  thumbnail_base64: string | null;
+}
+
+export interface LinkObject {
+  id: string;
+  link_index: number;
+  kind: number;
+  uri: string;
+  target_page: number;
+  bbox: [number, number, number, number];
+}
+
+export interface PageObjectsData {
+  page_index: number;
+  width: number;
+  height: number;
+  rotation: number;
+  text_spans: TextSpanObject[];
+  images: ImageObject[];
+  links: LinkObject[];
+  vector_drawings_count: number;
+}
+
+export interface AnnotationItem {
+  xref: number;
+  page_index: number;
+  page_number: number;
+  type: string;
+  bbox: [number, number, number, number];
+  content: string;
+  author: string;
+  subject: string;
+  created_at: string;
+  modified_at: string;
+  color: string;
+  opacity: number;
+}
+
+export interface FormFieldItem {
+  xref: number;
+  page_index: number;
+  page_number: number;
+  field_name: string;
+  field_label: string;
+  field_type: 'text' | 'checkbox' | 'radiobutton' | 'dropdown' | 'listbox' | 'signature' | string;
+  value: string | boolean;
+  checked: boolean;
+  choices: string[];
+  bbox: [number, number, number, number];
+  text_fontsize: number;
+  text_color: string;
+  fill_color: string | null;
+  border_color: string | null;
+  is_signed: boolean;
+  read_only: boolean;
+}
+
+export interface BookmarkItem {
+  index: number;
+  level: number;
+  title: string;
+  page_number: number;
+  page_index: number;
+}
+
+export interface AttachmentItem {
+  name: string;
+  filename: string;
+  description: string;
+  size_bytes: number;
+}
+
+export interface FontItem {
+  xref: number;
+  name: string;
+  resource_name: string;
+  type: string;
+  encoding: string;
+  extension: string;
+  is_embedded: boolean;
+  is_subset: boolean;
+  first_seen_page: number;
+}
+
+export interface SignatureVerificationReport {
+  has_cryptographic_signatures: boolean;
+  signature_count: number;
+  all_intact: boolean;
+  signatures: Array<{
+    field_name: string;
+    cryptographic: boolean;
+    intact: boolean;
+    valid_digest: boolean;
+    entire_file_covered: boolean;
+    tampered: boolean;
+    coverage_level: string;
+    signer_subject: string;
+    signer_issuer: string;
+    serial_number: string;
+    certificate_sha256: string;
+    reason: string;
+    location: string;
+    byte_range: number[];
+    summary: string;
+  }>;
+}
+
+export interface PreflightReport {
+  score: number;
+  pdf_version: string;
+  is_pdfa: boolean;
+  pdfa_conformance: string;
+  is_tagged: boolean;
+  has_language: boolean;
+  total_characters: number;
+  total_images: number;
+  unembedded_fonts: string[];
+  checks: Array<{
+    id: string;
+    category: string;
+    name: string;
+    status: 'pass' | 'warn' | 'fail' | 'info';
+    detail: string;
+  }>;
+}
+
+export interface ComparisonReport {
+  doc_a_pages: number;
+  doc_b_pages: number;
+  compared_pages: number;
+  overall_visual_similarity_percent: number;
+  has_differences: boolean;
+  pages: Array<{
+    page_index: number;
+    page_number: number;
+    text_identical: boolean;
+    added_lines: string[];
+    removed_lines: string[];
+    unified_diff: string;
+    visual_similarity_percent: number;
+    changed_area_percent: number;
+    diff_image_base64: string;
+  }>;
+}
+
+declare global {
+  interface Window {
+    vellumDesktop?: {
+      isDesktopApp: boolean;
+      platform: string;
+      getBackendUrl: () => Promise<string>;
+      openFileDialog: () => Promise<string | null>;
+      saveFileDialog: (defaultFilename?: string) => Promise<string | null>;
+      printDocument: () => Promise<{ printed: boolean }>;
+      onMenuAction: (cb: (payload: { action: string; [key: string]: any }) => void) => () => void;
+    };
+  }
+}
+

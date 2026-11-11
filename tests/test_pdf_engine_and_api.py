@@ -1,0 +1,847 @@
+"""Comprehensive Unit, Integration, and Persistence QA Test Suite for Vellum PDF Pro Engine & API."""
+
+from __future__ import annotations
+
+import base64
+import io
+import os
+from pathlib import Path
+
+from fastapi.testclient import TestClient
+from PIL import Image, ImageDraw
+import pymupdf
+import pytest
+
+from backend.app import app, session_manager
+from backend.engine.direct_edit import edit_text_span, inspect_page_objects
+from backend.engine.utils import compare_page_renders
+
+client = TestClient(app)
+
+
+@pytest.fixture(autouse=True)
+def isolate_recovery_dir(tmp_path: Path):
+    session_manager.sessions.clear()
+    session_manager.recovery_dir = tmp_path / "recovery"
+    session_manager.recovery_dir.mkdir(parents=True, exist_ok=True)
+    yield
+
+
+def test_health_and_showcase_lifecycle(tmp_path: Path):
+    """Test engine health, opening showcase PDF, safe saving with backup, reopening, and undo/redo."""
+    r = client.get("/api/health")
+    assert r.status_code == 200
+    data = r.json()
+    assert data["status"] == "ok"
+    assert data["libraries"]["rapidocr_offline"] is True
+
+    # Open showcase document
+    r_open = client.post("/api/docs/sample")
+    assert r_open.status_code == 200
+    doc_info = r_open.json()
+    doc_id = doc_info["doc_id"]
+    assert doc_info["page_count"] == 3
+    assert doc_info["dirty"] is False
+
+    # Render page 0 and thumbnails
+    r_render = client.get(f"/api/docs/{doc_id}/pages/0/render?dpi=96")
+    assert r_render.status_code == 200
+    assert r_render.json()["pixel_width"] > 100
+
+    r_thumbs = client.get(f"/api/docs/{doc_id}/thumbnails")
+    assert r_thumbs.status_code == 200
+    assert len(r_thumbs.json()) == 3
+
+    # Safe Save to disk, then modify and Safe Save again to verify .bak backup creation
+    save_target = tmp_path / "contract_saved.pdf"
+    r_save1 = client.post(
+        f"/api/docs/{doc_id}/save",
+        json={"target_path": str(save_target), "create_backup": True},
+    )
+    assert r_save1.status_code == 200
+    assert save_target.exists()
+
+    # Add a blank page (mutates doc -> dirty=True), then undo and redo
+    r_ins = client.post(f"/api/docs/{doc_id}/pages/insert-blank", json={"index": -1})
+    assert r_ins.status_code == 200
+    assert r_ins.json()["page_count"] == 4
+    assert r_ins.json()["dirty"] is True
+
+    r_undo = client.post(f"/api/docs/{doc_id}/undo")
+    assert r_undo.status_code == 200
+    assert r_undo.json()["summary"]["page_count"] == 3
+
+    r_redo = client.post(f"/api/docs/{doc_id}/redo")
+    assert r_redo.status_code == 200
+    assert r_redo.json()["summary"]["page_count"] == 4
+
+    # Save again -> .bak must exist with original 3-page version
+    r_save2 = client.post(
+        f"/api/docs/{doc_id}/save",
+        json={"target_path": str(save_target), "create_backup": True},
+    )
+    assert r_save2.status_code == 200
+    bak_file = Path(str(save_target) + ".bak")
+    assert bak_file.exists()
+
+    # Reopen both saved and backup files to verify persistence
+    r_reopen = client.post("/api/docs/open-path", json={"file_path": str(save_target)})
+    assert r_reopen.status_code == 200
+    assert r_reopen.json()["page_count"] == 4
+
+    r_reopen_bak = client.post("/api/docs/open-path", json={"file_path": str(bak_file)})
+    assert r_reopen_bak.status_code == 200
+    assert r_reopen_bak.json()["page_count"] == 3
+
+
+def test_crash_recovery_journal(tmp_path: Path):
+    """Verify automatic crash recovery snapshot creation and session restoration."""
+    r_new = client.post("/api/docs/new", json={"filename": "UnsavedWork.pdf", "page_count": 2})
+    doc_id = r_new.json()["doc_id"]
+
+    # Mutate document
+    client.post(
+        f"/api/docs/{doc_id}/pages/0/add-text",
+        json={"text": "Crash Recovery Test Line", "bbox": [72, 72, 300, 110], "font_size": 14},
+    )
+
+    # Simulate crash by clearing active in-memory session dict without deleting recovery disk journal
+    session_manager.sessions.clear()
+    recoverable = client.get("/api/recovery").json()
+    assert any(item["doc_id"] == doc_id for item in recoverable)
+
+    # Restore session from crash recovery journal
+    r_restored = client.post(f"/api/recovery/{doc_id}/restore")
+    assert r_restored.status_code == 200
+    objs = client.get(f"/api/docs/{doc_id}/pages/0/objects").json()
+    assert any("Crash Recovery Test Line" in s["text"] for s in objs["text_spans"])
+
+
+def test_direct_text_editing_preserves_background_without_white_rectangle(tmp_path: Path):
+    """
+    CRITICAL REQUIREMENT: Verify that editing existing PDF text modifies the PDF content stream
+    in-place without drawing a white rectangle over colored background graphics, and preserves
+    all unrelated content.
+    """
+    r_open = client.post("/api/docs/sample")
+    doc_id = r_open.json()["doc_id"]
+    before_bytes = client.get(f"/api/docs/{doc_id}/download").content
+
+    # Inspect Page 0 objects
+    objs = client.get(f"/api/docs/{doc_id}/pages/0/objects").json()
+    title_span = next(s for s in objs["text_spans"] if "MASTER SOFTWARE" in s["text"])
+
+    # Edit the title span on top of the colored banner
+    r_edit = client.post(
+        f"/api/docs/{doc_id}/pages/0/edit-text",
+        json={
+            "orig_bbox": title_span["bbox"],
+            "orig_origin": title_span["origin"],
+            "new_text": "AMENDED LINUX ENTERPRISE AGREEMENT",
+            "font_name": title_span["font"],
+            "original_font": title_span["font"],
+            "font_size": title_span["size"],
+            "color_hex": "#1e3a8a",
+            "bold": True,
+        },
+    )
+    assert r_edit.status_code == 200
+    edit_res = r_edit.json()
+    assert edit_res["edit_method"] == "direct_content_stream"
+    assert edit_res["whiteout_used"] is False
+
+    # Save, reopen, and verify:
+    # 1. Old text "MASTER SOFTWARE SERVICES AGREEMENT" is completely gone
+    # 2. New text "AMENDED LINUX ENTERPRISE AGREEMENT" is present
+    # 3. Unrelated text on Page 1 ("Scope of Professional Services") and Page 2 is untouched
+    # 4. Background banner pixel color inside the edited box is still light blue (224, 237, 255), NOT white (255, 255, 255)!
+    saved_path = tmp_path / "direct_edited.pdf"
+    client.post(f"/api/docs/{doc_id}/save", json={"target_path": str(saved_path)})
+
+    with pymupdf.open(str(saved_path)) as reopened:
+        p0_text = reopened[0].get_text("text")
+        assert "MASTER SOFTWARE SERVICES AGREEMENT" not in p0_text
+        assert "AMENDED LINUX ENTERPRISE AGREEMENT" in p0_text
+        assert "1. Scope of Professional Services" in p0_text
+        assert "Schedule A" in reopened[1].get_text("text")
+
+        # Check pixel color at the right end of the old title bbox where "AGREEMENT" used to be
+        pix = reopened[0].get_pixmap(dpi=72, alpha=False)
+        bg_sample = pix.pixel(int(title_span["bbox"][2] - 5), int(title_span["bbox"][1] + 4))
+        # Must be the light-blue banner fill (~224, 237, 255), never pure white (255, 255, 255)
+        assert bg_sample[0] < 240 and bg_sample[2] > 245, f"Expected light blue banner pixel, got {bg_sample}"
+
+        # Visual diff check on Page 2 (unrelated page must be 100% identical)
+        after_bytes = saved_path.read_bytes()
+        diff_p2 = compare_page_renders(before_bytes, after_bytes, page_index=1)
+        assert diff_p2["similarity_percent"] == 100.0
+
+
+def test_subset_font_fallback_detection():
+    """Verify that editing a text span originally using a subsetted font triggers a clear fallback notice."""
+    doc = pymupdf.open()
+    page = doc.new_page()
+    page.insert_text((72, 100), "Subset Font Sample", fontsize=14, fontname="helv")
+    raw = doc.tobytes()
+    doc.close()
+
+    objs = inspect_page_objects(raw, 0)
+    span = objs["text_spans"][0]
+    res = edit_text_span(
+        pdf_bytes=raw,
+        page_index=0,
+        orig_bbox=span["bbox"],
+        orig_origin=span["origin"],
+        new_text="Edited Subset Text",
+        original_font="ABCDEF+CustomCorporateSans",
+        font_name="ABCDEF+CustomCorporateSans",
+        font_size=14,
+    )
+    assert res["fallback_used"] is True
+    assert "subset font" in res["fallback_reason"].lower()
+
+
+def test_direct_image_shapes_and_hyperlinks_editing(tmp_path: Path):
+    """Test inserting, transforming (move/resize/crop/rotate), replacing, and deleting PDF images, shapes, and links."""
+    r_open = client.post("/api/docs/sample")
+    doc_id = r_open.json()["doc_id"]
+
+    objs0 = client.get(f"/api/docs/{doc_id}/pages/0/objects").json()
+    assert len(objs0["images"]) == 1
+    img_obj = objs0["images"][0]
+    xref = img_obj["xref"]
+
+    # Transform (move, resize, crop, rotate) existing image
+    r_tr = client.post(
+        f"/api/docs/{doc_id}/pages/0/edit-image",
+        json={
+            "xref": xref,
+            "action": "transform",
+            "orig_bbox": img_obj["bbox"],
+            "new_bbox": [360, 140, 540, 260],
+            "rotation": 90,
+            "crop_ratios": [0.05, 0.05, 0.95, 0.95],
+        },
+    )
+    assert r_tr.status_code == 200
+    assert len(r_tr.json()["objects"]["images"]) == 1
+
+    # Insert a new PNG image
+    pil_new = Image.new("RGB", (100, 80), (16, 185, 129))
+    buf = io.BytesIO()
+    pil_new.save(buf, format="PNG")
+    r_ins_img = client.post(
+        f"/api/docs/{doc_id}/pages/0/insert-image",
+        files={"file": ("badge.png", buf.getvalue(), "image/png")},
+        data={"x0": "50", "y0": "420", "x1": "170", "y1": "510", "rotation": "0"},
+    )
+    assert r_ins_img.status_code == 200
+    assert len(r_ins_img.json()["objects"]["images"]) == 2
+
+    # Delete the newly inserted image
+    second_xref = r_ins_img.json()["objects"]["images"][-1]["xref"]
+    r_del_img = client.post(
+        f"/api/docs/{doc_id}/pages/0/edit-image",
+        json={"xref": second_xref, "action": "delete"},
+    )
+    assert r_del_img.status_code == 200
+    assert len(r_del_img.json()["objects"]["images"]) == 1
+
+    # Add vector arrow shape and update hyperlink
+    r_shape = client.post(
+        f"/api/docs/{doc_id}/pages/0/add-shape",
+        json={"shape_type": "arrow", "bbox": [50, 520, 220, 550], "stroke_hex": "#dc2626", "stroke_width": 2.5},
+    )
+    assert r_shape.status_code == 200
+
+    r_link = client.post(
+        f"/api/docs/{doc_id}/pages/0/hyperlink",
+        json={"action": "add", "bbox": [50, 560, 250, 585], "uri": "https://kernel.org"},
+    )
+    assert r_link.status_code == 200
+    assert any(l["uri"] == "https://kernel.org" for l in r_link.json()["objects"]["links"])
+
+
+def test_page_management_operations():
+    """Test insert, duplicate, reorder, rotate, crop, resize, extract, split, and merge."""
+    r_open = client.post("/api/docs/sample")
+    doc_id = r_open.json()["doc_id"]
+
+    # Duplicate page 0 -> 4 pages
+    r_dup = client.post(f"/api/docs/{doc_id}/pages/duplicate", json={"page_index": 0})
+    assert r_dup.json()["page_count"] == 4
+
+    # Delete duplicated page 1 -> 3 pages
+    r_del = client.post(f"/api/docs/{doc_id}/pages/delete", json={"page_indices": [1]})
+    assert r_del.json()["page_count"] == 3
+
+    # Reorder pages [2, 0, 1]
+    r_reord = client.post(f"/api/docs/{doc_id}/pages/reorder", json={"new_order": [2, 0, 1]})
+    assert r_reord.status_code == 200
+    objs_new_p0 = client.get(f"/api/docs/{doc_id}/pages/0/objects").json()
+    assert any("Schedule B" in s["text"] for s in objs_new_p0["text_spans"])
+
+    # Rotate page 0 by 90 deg
+    r_rot = client.post(f"/api/docs/{doc_id}/pages/rotate", json={"page_indices": [0], "delta_degrees": 90})
+    assert r_rot.json()["pages"][0]["rotation"] == 90
+
+    # Crop page 0 with margins
+    r_crop = client.post(
+        f"/api/docs/{doc_id}/pages/crop",
+        json={"page_index": 0, "margins": {"top": 20, "bottom": 20, "left": 20, "right": 20}},
+    )
+    assert r_crop.status_code == 200
+
+    # Resize page 1 to Letter (612 x 792)
+    r_res = client.post(
+        f"/api/docs/{doc_id}/pages/resize",
+        json={"new_width": 612, "new_height": 792, "page_indices": [1], "scale_content": True},
+    )
+    assert r_res.json()["pages"][1]["width_pt"] == 612.0
+
+    # Extract page 1 into a new tab
+    r_ext = client.post(f"/api/docs/{doc_id}/pages/extract?open_as_tab=true", json={"page_indices": [0]})
+    ext_doc_id = r_ext.json()["doc_id"]
+    assert r_ext.json()["page_count"] == 1
+
+    # Merge the two open tabs into a combined 4-page PDF
+    r_merge = client.post(
+        "/api/docs/merge",
+        json={"doc_ids": [doc_id, ext_doc_id], "output_filename": "Merged.pdf"},
+    )
+    assert r_merge.json()["page_count"] == 4
+
+    # Split into 2 parts
+    r_split = client.post(
+        f"/api/docs/{doc_id}/pages/split?open_tabs=false",
+        json={"mode": "ranges", "ranges_spec": "1-2; 3"},
+    )
+    assert r_split.json()["split_count"] == 2
+
+
+def test_annotations_and_review_workflow():
+    """Test creating, listing, editing, and deleting all annotation types."""
+    r_open = client.post("/api/docs/sample")
+    doc_id = r_open.json()["doc_id"]
+
+    for a_type in ("highlight", "underline", "strikeout", "sticky_note", "freetext", "ink", "arrow", "rect", "stamp"):
+        r_add = client.post(
+            f"/api/docs/{doc_id}/annotations",
+            json={
+                "page_index": 0,
+                "annot_type": a_type,
+                "bbox": [60, 400, 220, 440],
+                "content": f"Review {a_type}",
+                "author": "QA Engineer",
+                "color_hex": "#eab308",
+            },
+        )
+        assert r_add.status_code == 200
+
+    annots = client.get(f"/api/docs/{doc_id}/annotations").json()
+    assert len(annots) >= 9
+
+    # Update annotation content and author
+    target_xref = annots[0]["xref"]
+    r_upd = client.put(
+        f"/api/docs/{doc_id}/annotations/{target_xref}",
+        json={"page_index": 0, "content": "Updated Review Comment", "author": "Lead Architect"},
+    )
+    assert r_upd.status_code == 200
+    updated_item = next(a for a in r_upd.json()["annotations"] if a["xref"] == target_xref)
+    assert updated_item["content"] == "Updated Review Comment"
+    assert updated_item["author"] == "Lead Architect"
+
+    # Delete annotation
+    r_del = client.delete(f"/api/docs/{doc_id}/annotations/{target_xref}?page_index=0")
+    assert r_del.status_code == 200
+    assert all(a["xref"] != target_xref for a in r_del.json()["annotations"])
+
+
+def test_forms_and_cryptographic_digital_signatures(tmp_path: Path):
+    """Test AcroForm creation/filling and PKCS#12 cryptographic digital signing & verification."""
+    r_open = client.post("/api/docs/sample")
+    doc_id = r_open.json()["doc_id"]
+
+    # List existing fields on Page 2 (index 1)
+    fields = client.get(f"/api/docs/{doc_id}/forms").json()
+    assert any(f["field_name"] == "client_organization" for f in fields)
+
+    # Create a new text field and checkbox on Page 3 (index 2)
+    r_create = client.post(
+        f"/api/docs/{doc_id}/forms/create",
+        json={
+            "page_index": 2,
+            "field_type": "text",
+            "field_name": "approver_title",
+            "bbox": [60, 140, 280, 168],
+            "default_value": "VP of Engineering",
+        },
+    )
+    assert r_create.status_code == 200
+
+    # Fill existing form fields
+    r_fill = client.post(
+        f"/api/docs/{doc_id}/forms/fill",
+        json={
+            "values": {
+                "client_organization": "Canonical Ubuntu Enterprise",
+                "approver_title": "Chief Information Security Officer",
+            }
+        },
+    )
+    assert r_fill.status_code == 200
+
+    # Apply a visual signature on Page 3
+    r_vis = client.post(
+        f"/api/docs/{doc_id}/signatures/visual",
+        json={
+            "page_index": 2,
+            "bbox": [60, 200, 260, 260],
+            "mode": "typed",
+            "signer_name": "Bob Reviewer",
+            "typed_text": "Bob Reviewer",
+        },
+    )
+    assert r_vis.status_code == 200
+    assert r_vis.json()["cryptographic"] is False
+
+    # Generate an X.509 PKCS#12 certificate and apply a CRYPTOGRAPHIC digital signature
+    r_cert = client.post(
+        "/api/signatures/generate-cert",
+        json={
+            "common_name": "Dr. Clara Oswald",
+            "organization": "Linux Foundation Assurance",
+            "passphrase": "test-pass-2026",
+        },
+    )
+    assert r_cert.status_code == 200
+    p12_b64 = r_cert.json()["p12_base64"]
+
+    r_sign = client.post(
+        f"/api/docs/{doc_id}/signatures/cryptographic",
+        json={
+            "page_index": 2,
+            "bbox": [60, 300, 340, 370],
+            "field_name": "ExecApprovalSig",
+            "reason": "Final Production Release Sign-Off",
+            "location": "Geneva, Switzerland",
+            "p12_base64": p12_b64,
+            "passphrase": "test-pass-2026",
+        },
+    )
+    assert r_sign.status_code == 200
+    sign_data = r_sign.json()
+    assert sign_data["cryptographic"] is True
+    assert sign_data["verification"]["has_cryptographic_signatures"] is True
+    assert sign_data["verification"]["all_intact"] is True
+    sig_entry = sign_data["verification"]["signatures"][0]
+    assert sig_entry["intact"] is True
+    assert sig_entry["valid_digest"] is True
+    assert "Clara Oswald" in sig_entry["signer_subject"]
+
+    # Save signed PDF, reopen, and verify both form values and cryptographic signature persisted intact!
+    signed_path = tmp_path / "signed_contract.pdf"
+    client.post(f"/api/docs/{doc_id}/save", json={"target_path": str(signed_path)})
+
+    r_reopen = client.post("/api/docs/open-path", json={"file_path": str(signed_path)})
+    re_id = r_reopen.json()["doc_id"]
+    re_fields = client.get(f"/api/docs/{re_id}/forms").json()
+    org_field = next(f for f in re_fields if f["field_name"] == "client_organization")
+    assert org_field["value"] == "Canonical Ubuntu Enterprise"
+
+    re_verify = client.get(f"/api/docs/{re_id}/signatures/verify").json()
+    assert re_verify["all_intact"] is True
+
+
+def test_offline_ocr_and_all_document_conversions():
+    """Test offline OCR on a scanned image-only PDF and bidirectional conversions (DOCX, XLSX, HTML, TXT, Images)."""
+    # 1. Build a pure raster scanned PDF page (0 selectable characters)
+    img = Image.new("RGB", (600, 300), (255, 255, 255))
+    draw = ImageDraw.Draw(img)
+    # Render large crisp text via PyMuPDF onto a bitmap to simulate a 200 DPI flatbed scan
+    tmp_doc = pymupdf.open()
+    tp = tmp_doc.new_page(width=400, height=200)
+    tp.insert_text((36, 70), "SCANNED PURCHASE ORDER #7741", fontsize=20, fontname="hebo")
+    tp.insert_text((36, 115), "Approved Vendor: Linux Systems Corp", fontsize=15, fontname="helv")
+    scan_png = tp.get_pixmap(dpi=180).tobytes("png")
+    tmp_doc.close()
+
+    r_img2pdf = client.post(
+        "/api/convert/images-to-pdf",
+        files=[("files", ("scan1.png", scan_png, "image/png"))],
+        data={"page_size": "a4", "open_as_tab": "true"},
+    )
+    assert r_img2pdf.status_code == 200
+    scan_doc_id = r_img2pdf.json()["doc_id"]
+
+    # Verify before OCR there is no selectable text
+    txt_before = client.post(f"/api/docs/{scan_doc_id}/export/txt").text
+    assert "PURCHASE" not in txt_before
+
+    # Run offline OCR
+    r_ocr = client.post(
+        f"/api/docs/{scan_doc_id}/ocr",
+        json={"language": "eng", "dpi": 180, "force_ocr_on_existing_text": True},
+    )
+    assert r_ocr.status_code == 200
+    assert r_ocr.json()["total_lines_added"] >= 1
+
+    # Verify searchable text layer is now embedded in the PDF!
+    txt_after = client.post(f"/api/docs/{scan_doc_id}/export/txt").text
+    assert "PURCHASE" in txt_after.upper() or "7741" in txt_after
+
+    # 2. Test conversions on showcase PDF (DOCX -> PDF, PDF -> DOCX, XLSX table extraction, HTML, Images)
+    r_sample = client.post("/api/docs/sample")
+    s_id = r_sample.json()["doc_id"]
+
+    r_docx = client.post(f"/api/docs/{s_id}/export/docx")
+    assert r_docx.status_code == 200
+    assert len(r_docx.content) > 1000
+
+    # Convert that DOCX back to PDF
+    r_back_pdf = client.post(
+        "/api/convert/docx-to-pdf",
+        files={"file": ("contract.docx", r_docx.content, "application/vnd.openxmlformats-officedocument.wordprocessingml.document")},
+        data={"open_as_tab": "true"},
+    )
+    assert r_back_pdf.status_code == 200
+    assert r_back_pdf.json()["page_count"] >= 1
+
+    # Extract tables from Page 2 into Excel .xlsx & JSON
+    r_tbl = client.post(f"/api/docs/{s_id}/export/tables-json")
+    assert r_tbl.status_code == 200
+    tbl_data = r_tbl.json()
+    assert tbl_data["tables_count"] >= 1
+    assert "$14,400.00" in tbl_data["csv_text"]
+
+    r_html = client.post(f"/api/docs/{s_id}/export/html")
+    assert r_html.status_code == 200
+    assert "<section class=\"pdf-page\"" in r_html.text
+
+
+def test_security_encryption_permanent_redaction_and_optimization(tmp_path: Path):
+    """Test AES-256 encryption, password verification, permanent content redaction, metadata scrub, and compression."""
+    r_sample = client.post("/api/docs/sample")
+    doc_id = r_sample.json()["doc_id"]
+
+    # 1. Permanent Redaction of SSN 999-42-8174
+    r_red = client.post(
+        f"/api/docs/{doc_id}/security/redact",
+        json={
+            "search_terms": ["999-42-8174", "ACCT-7781920"],
+            "overlay_text": "REDACTED-PII",
+            "fill_color_hex": "#000000",
+        },
+    )
+    assert r_red.status_code == 200
+    assert r_red.json()["redacted_regions_count"] >= 2
+
+    # Verify the sensitive strings are permanently purged from extracted text AND raw PDF stream
+    txt_post_redact = client.post(f"/api/docs/{doc_id}/export/txt").text
+    assert "999-42-8174" not in txt_post_redact
+    assert "ACCT-7781920" not in txt_post_redact
+
+    # 2. Sanitize hidden metadata
+    r_san = client.post(f"/api/docs/{doc_id}/security/sanitize")
+    assert r_san.status_code == 200
+    props = client.get(f"/api/docs/{doc_id}/properties").json()
+    assert props["title"] == ""
+
+    # 3. Compress & Optimize PDF
+    r_opt = client.post(
+        f"/api/docs/{doc_id}/optimize",
+        json={"image_quality": 70, "max_image_dimension": 1200, "linearize": False},
+    )
+    assert r_opt.status_code == 200
+    assert r_opt.json()["optimized_size_bytes"] > 0
+
+    # 4. Encrypt with AES-256 password, save to disk, verify opening without password fails (401), and opening with password succeeds
+    r_enc = client.post(
+        f"/api/docs/{doc_id}/security/encrypt",
+        json={
+            "user_password": "linux-user-123",
+            "owner_password": "linux-owner-456",
+            "encryption_level": "AES-256",
+            "allow_print": True,
+            "allow_modify": False,
+        },
+    )
+    assert r_enc.status_code == 200
+    enc_path = tmp_path / "encrypted_aes256.pdf"
+    enc_path.write_bytes(base64.b64decode(r_enc.json()["encrypted_base64"]))
+
+    # Opening without password must return 401 PDF_PASSWORD_REQUIRED
+    r_fail = client.post("/api/docs/open-path", json={"file_path": str(enc_path)})
+    assert r_fail.status_code == 401
+
+    # Opening with correct password must succeed
+    r_ok = client.post(
+        "/api/docs/open-path",
+        json={"file_path": str(enc_path), "password": "linux-user-123"},
+    )
+    assert r_ok.status_code == 200
+    assert r_ok.json()["is_encrypted"] is True
+
+
+def test_pro_features_compare_watermarks_bates_bookmarks_attachments_and_pdfa():
+    """Test PDF comparison, watermarks, headers/footers, Bates numbering, bookmarks, attachments, preflight, and PDF/A."""
+    r1 = client.post("/api/docs/sample")
+    id_a = r1.json()["doc_id"]
+
+    r2 = client.post("/api/docs/sample")
+    id_b = r2.json()["doc_id"]
+
+    # Apply Header/Footer, Watermark, and Bates Numbering to Doc B
+    assert client.post(
+        f"/api/docs/{id_b}/pro/header-footer",
+        json={"header_right": "CONFIDENTIAL", "footer_center": "Page {page} of {total}"},
+    ).status_code == 200
+
+    assert client.post(
+        f"/api/docs/{id_b}/pro/watermark",
+        json={"text": "DRAFT COPY", "opacity": 0.25, "rotation": 45},
+    ).status_code == 200
+
+    r_bates = client.post(
+        f"/api/docs/{id_b}/pro/bates",
+        json={"prefix": "LGL-", "start_number": 101, "digits": 5, "position": "bottom_right"},
+    )
+    assert r_bates.status_code == 200
+    assert r_bates.json()["first_bates"] == "LGL-00101"
+    assert r_bates.json()["last_bates"] == "LGL-00103"
+
+    # Compare Doc A and Doc B
+    r_cmp = client.post("/api/docs/compare", json={"doc_id_a": id_a, "doc_id_b": id_b})
+    assert r_cmp.status_code == 200
+    cmp_data = r_cmp.json()
+    assert cmp_data["has_differences"] is True
+    assert any("LGL-00101" in line for line in cmp_data["pages"][0]["added_lines"])
+
+    # Bookmarks add & delete
+    r_bm = client.post(
+        f"/api/docs/{id_b}/bookmarks",
+        json={"title": "Appendix Z", "page_index": 2, "level": 1},
+    )
+    assert r_bm.status_code == 200
+    assert any(b["title"] == "Appendix Z" for b in r_bm.json()["bookmarks"])
+
+    # Attachments add, list, extract, delete
+    r_att = client.post(
+        f"/api/docs/{id_b}/attachments",
+        files={"file": ("schedule.csv", b"col1,col2\n10,20\n", "text/csv")},
+        data={"description": "Raw CSV data"},
+    )
+    assert r_att.status_code == 200
+    assert len(r_att.json()["attachments"]) == 1
+
+    r_ext_att = client.get(f"/api/docs/{id_b}/attachments/schedule.csv")
+    assert r_ext_att.content == b"col1,col2\n10,20\n"
+
+    # Preflight & PDF/A-2b conversion
+    r_pdfa = client.post(
+        f"/api/docs/{id_b}/pro/pdfa",
+        json={"conformance": "2B", "language": "en-US", "title": "Archival MSA"},
+    )
+    assert r_pdfa.status_code == 200
+    assert r_pdfa.json()["is_pdfa"] is True
+    assert r_pdfa.json()["preflight_score"] >= 80
+
+
+def test_direct_edit_embedded_and_subsetted_fonts_deep_verification(tmp_path: Path):
+    """
+    Test direct text editing with embedded TrueType fonts, subsetted TrueType fonts,
+    zero-gap horizontal spans, and tight vertical line spacing.
+    """
+    import fontTools.ttLib
+    from backend.engine.direct_edit import edit_text_span, inspect_page_objects
+
+    dejavu_path = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
+    assert os.path.exists(dejavu_path), "DejaVuSans.ttf must exist in environment"
+
+    # 1. Full embedded font test
+    doc = pymupdf.open()
+    page = doc.new_page(width=612, height=792)
+    page.insert_font(fontname="dejavu", fontfile=dejavu_path)
+    page.insert_text((72, 100), "Embedded TrueType Baseline String", fontname="dejavu", fontsize=12)
+    raw = doc.tobytes()
+
+    objs = inspect_page_objects(raw, 0)
+    sp = objs["text_spans"][0]
+    assert sp["can_edit_losslessly"] is True
+
+    res = edit_text_span(
+        raw,
+        page_index=0,
+        orig_bbox=sp["bbox"],
+        orig_origin=sp["origin"],
+        new_text="Embedded TrueType MODIFIED String",
+        original_font=sp["font"],
+        font_size=sp["size"],
+        keep_original_font=True,
+    )
+    assert res["edit_method"] == "direct_content_stream"
+    assert res["font_strategy"] == "original_font"
+    assert res["fallback_used"] is False
+
+    # Verify modification persists
+    objs2 = inspect_page_objects(res["pdf_bytes"], 0)
+    texts = [s["text"] for s in objs2["text_spans"]]
+    assert any("MODIFIED" in t for t in texts)
+
+    # 2. Subsetted font test: existing glyphs vs missing glyphs
+    doc_sub = pymupdf.open()
+    p_sub = doc_sub.new_page(width=612, height=792)
+    p_sub.insert_font(fontname="dejavu", fontfile=dejavu_path)
+    p_sub.insert_text((72, 100), "Alpha Beta Gamma", fontname="dejavu", fontsize=12)
+    doc_sub.subset_fonts()
+    raw_sub = doc_sub.tobytes()
+
+    objs_sub = inspect_page_objects(raw_sub, 0)
+    sp_sub = objs_sub["text_spans"][0]
+    assert sp_sub["is_subset_font"] is True
+
+    # Edit using characters already in the subset ("Beta Alpha")
+    res_in_sub = edit_text_span(
+        raw_sub,
+        page_index=0,
+        orig_bbox=sp_sub["bbox"],
+        orig_origin=sp_sub["origin"],
+        new_text="Beta Alpha",
+        original_font=sp_sub["font"],
+        font_size=sp_sub["size"],
+        keep_original_font=True,
+    )
+    assert res_in_sub["font_strategy"] == "original_font"
+    assert res_in_sub["fallback_used"] is False
+
+    # Edit using characters NOT in the subset ("Zeta") -> must fallback gracefully
+    res_fallback = edit_text_span(
+        raw_sub,
+        page_index=0,
+        orig_bbox=sp_sub["bbox"],
+        orig_origin=sp_sub["origin"],
+        new_text="Zeta",
+        original_font=sp_sub["font"],
+        font_size=sp_sub["size"],
+        keep_original_font=True,
+    )
+    assert res_fallback["font_strategy"] == "substitute_font"
+    assert res_fallback["fallback_used"] is True
+    assert "subset" in res_fallback["fallback_reason"].lower()
+
+    # 3. Tight vertical line spacing (10.5pt leading on 12pt font)
+    doc_tight = pymupdf.open()
+    p_tight = doc_tight.new_page(width=612, height=792)
+    p_tight.insert_text((72, 100), "Line 1: Tight above gyqpj", fontsize=12)
+    p_tight.insert_text((72, 110.5), "Line 2: TARGET TO EDIT", fontsize=12)
+    p_tight.insert_text((72, 121), "Line 3: Tight below BDFHKL", fontsize=12)
+    raw_tight = doc_tight.tobytes()
+
+    objs_tight = inspect_page_objects(raw_tight, 0)
+    sp_target = [s for s in objs_tight["text_spans"] if "TARGET" in s["text"]][0]
+    res_tight = edit_text_span(
+        raw_tight,
+        page_index=0,
+        orig_bbox=sp_target["bbox"],
+        orig_origin=sp_target["origin"],
+        new_text="Line 2: REPLACED PERFECTLY",
+        original_font=sp_target["font"],
+        font_size=sp_target["size"],
+    )
+    objs_tight_after = inspect_page_objects(res_tight["pdf_bytes"], 0)
+    tight_texts = [s["text"] for s in objs_tight_after["text_spans"]]
+    assert "Line 1: Tight above gyqpj" in tight_texts
+    assert "Line 2: REPLACED PERFECTLY" in tight_texts
+    assert "Line 3: Tight below BDFHKL" in tight_texts
+
+    # 4. Zero-gap horizontal adjacent spans
+    doc_h = pymupdf.open()
+    p_h = doc_h.new_page(width=612, height=792)
+    p_h.insert_text((72, 100), "BoldPrefix", fontsize=12, fontname="hebo")
+    adv = pymupdf.get_text_length("BoldPrefix", fontname="hebo", fontsize=12)
+    p_h.insert_text((72 + adv, 100), "ImmediatelyTouchingSuffix", fontsize=12, fontname="helv")
+    raw_h = doc_h.tobytes()
+
+    objs_h = inspect_page_objects(raw_h, 0)
+    sp_prefix = [s for s in objs_h["text_spans"] if "BoldPrefix" in s["text"]][0]
+    res_h = edit_text_span(
+        raw_h,
+        page_index=0,
+        orig_bbox=sp_prefix["bbox"],
+        orig_origin=sp_prefix["origin"],
+        new_text="NewPrefix",
+        original_font=sp_prefix["font"],
+        font_size=sp_prefix["size"],
+    )
+    objs_h_after = inspect_page_objects(res_h["pdf_bytes"], 0)
+    h_texts = [s["text"] for s in objs_h_after["text_spans"]]
+    assert any("ImmediatelyTouchingSuffix" in t for t in h_texts)
+    assert any("NewPrefix" in t for t in h_texts)
+
+
+def test_session_encryption_persistence_and_export_get(tmp_path: Path):
+    """
+    Verify that encrypting a session allows ongoing edits/renders and that
+    safe_save / download produces an encrypted PDF file verifiable on disk.
+    Also verify GET /export/{fmt} endpoints.
+    """
+    # 1. Create document
+    r_new = client.post("/api/docs/new", json={"filename": "persisted_enc.pdf", "page_count": 2})
+    assert r_new.status_code == 200
+    doc_id = r_new.json()["doc_id"]
+
+    # 2. Encrypt session
+    r_enc = client.post(
+        f"/api/docs/{doc_id}/security/encrypt",
+        json={"user_password": "persist_pw_123", "encryption_level": "AES-256"},
+    )
+    assert r_enc.status_code == 200
+    assert r_enc.json()["encrypted"] is True
+
+    # 3. Subsequent session operations must succeed without 500
+    r_info = client.get(f"/api/docs/{doc_id}")
+    assert r_info.status_code == 200
+    assert r_info.json()["page_count"] == 2
+
+    r_render = client.get(f"/api/docs/{doc_id}/pages/0/render")
+    assert r_render.status_code == 200
+    assert len(r_render.content) > 100
+
+    # 4. Safe save to disk
+    save_file = tmp_path / "saved_encrypted.pdf"
+    r_save = client.post(f"/api/docs/{doc_id}/save", json={"target_path": str(save_file)})
+    assert r_save.status_code == 200
+    assert save_file.exists()
+
+    # 5. Open disk file: must be encrypted, requiring password
+    saved_bytes = save_file.read_bytes()
+    doc_check = pymupdf.open(stream=saved_bytes, filetype="pdf")
+    assert doc_check.is_encrypted is True
+    assert doc_check.authenticate("wrong_pw") == 0
+    assert doc_check.authenticate("persist_pw_123") > 0
+    doc_check.close()
+
+    # 6. GET /export/{fmt} verification
+    for fmt in ("docx", "xlsx", "csv", "html", "txt"):
+        res = client.get(f"/api/docs/{doc_id}/export/{fmt}")
+        assert res.status_code == 200, f"GET /export/{fmt} failed: {res.text}"
+
+
+def test_corrupted_pdf_graceful_recovery_and_repair():
+    """Verify corrupted/truncated PDF handling and structural repair endpoint."""
+    r_sample = client.post("/api/docs/sample")
+    doc_id = r_sample.json()["doc_id"]
+
+    r_rep = client.post(f"/api/docs/{doc_id}/repair")
+    assert r_rep.status_code == 200
+    assert r_rep.json()["repaired"] is True
+    assert len(r_rep.json()["diagnostics"]) >= 1
+
+    # Totally invalid non-PDF garbage must return clean 400 error instead of crashing
+    r_bad = client.post(
+        "/api/docs/open-upload",
+        files={"file": ("broken.pdf", b"NOT_A_VALID_PDF_HEADER_AT_ALL_0000", "application/pdf")},
+    )
+    assert r_bad.status_code == 400
+
