@@ -89,3 +89,4 @@ npm run package:linux
 3. Ensure no temporary test PDFs, private keys, or `.bak` files are tracked.
 4. Push to your fork and submit a Pull Request targeting `main`.
 5. Provide a summary of changes, screenshot evidence (for UI modifications), and test results.
+

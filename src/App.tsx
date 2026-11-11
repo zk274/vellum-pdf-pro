@@ -229,6 +229,14 @@ export default function App() {
   const [showAboutModal, setShowAboutModal] = useState<boolean>(false);
   const [showRecoveryModal, setShowRecoveryModal] = useState<boolean>(false);
 
+  // Password Unlock Modal state
+  const [passwordPrompt, setPasswordPrompt] = useState<{
+    filePath?: string;
+    fileObj?: File;
+    error?: string;
+  } | null>(null);
+  const [enteredPassword, setEnteredPassword] = useState<string>('');
+
   // Hidden file inputs for uploads
   const fileOpenInputRef = useRef<HTMLInputElement | null>(null);
   const imageInsertInputRef = useRef<HTMLInputElement | null>(null);
@@ -388,14 +396,8 @@ export default function App() {
         notify(`Opened ${doc.filename}`);
       } catch (err: any) {
         if (err.status === 401) {
-          const pwd = window.prompt('This PDF is encrypted. Enter password to unlock:');
-          if (pwd !== null) {
-            const doc = await pdfApi.openByPath(chosenPath, pwd);
-            setOpenDocs((prev) => [...prev, doc]);
-            setActiveDocId(doc.doc_id);
-            setCurrentPage(0);
-            notify(`Unlocked and opened ${doc.filename}`);
-          }
+          setPasswordPrompt({ filePath: chosenPath });
+          setEnteredPassword('');
         } else {
           notify(`Open failed: ${err.message}`, 'warn');
         }
@@ -417,17 +419,33 @@ export default function App() {
       notify(`Opened ${doc.filename}`);
     } catch (err: any) {
       if (err.status === 401) {
-        const pwd = window.prompt('This PDF is password-protected. Enter password:');
-        if (pwd !== null) {
-          const doc = await pdfApi.openUpload(file, pwd);
-          setOpenDocs((prev) => [...prev, doc]);
-          setActiveDocId(doc.doc_id);
-          setCurrentPage(0);
-          notify(`Unlocked and opened ${doc.filename}`);
-        }
+        setPasswordPrompt({ fileObj: file });
+        setEnteredPassword('');
       } else {
         notify(`Open failed: ${err.message}`, 'warn');
       }
+    }
+  };
+
+  const handleUnlockEncryptedDoc = async () => {
+    if (!passwordPrompt) return;
+    try {
+      let doc;
+      if (passwordPrompt.filePath) {
+        doc = await pdfApi.openByPath(passwordPrompt.filePath, enteredPassword);
+      } else if (passwordPrompt.fileObj) {
+        doc = await pdfApi.openUpload(passwordPrompt.fileObj, enteredPassword);
+      }
+      if (doc) {
+        setOpenDocs((prev) => [...prev, doc]);
+        setActiveDocId(doc.doc_id);
+        setCurrentPage(0);
+        setPasswordPrompt(null);
+        setEnteredPassword('');
+        notify(`Unlocked and opened ${doc.filename}`);
+      }
+    } catch (err: any) {
+      setPasswordPrompt((prev) => (prev ? { ...prev, error: 'Incorrect password. Please try again.' } : null));
     }
   };
 
@@ -3398,6 +3416,54 @@ export default function App() {
                 <strong>Engines:</strong> PyMuPDF (AGPL-3.0), pikepdf/QPDF (MPL-2.0), pyHanko (MIT),
                 RapidOCR/ONNXRuntime (Apache-2.0), pdfplumber (MIT), LibreOffice & Ghostscript.
               </p>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL: ENCRYPTED PDF PASSWORD UNLOCK */}
+      {passwordPrompt && (
+        <div className="modal-backdrop" onClick={() => setPasswordPrompt(null)}>
+          <div className="modal-card" onClick={(e) => e.stopPropagation()} style={{ width: 440 }}>
+            <div className="modal-header">
+              <span style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <KeyRound size={16} color="var(--primary)" />
+                Password-Protected Document
+              </span>
+              <button className="tab-close" onClick={() => setPasswordPrompt(null)}>
+                <X size={16} />
+              </button>
+            </div>
+            <div className="modal-body">
+              <p style={{ fontSize: 13, marginBottom: 12, color: 'var(--text-secondary)' }}>
+                This PDF document is encrypted. Please enter the password to decrypt and view its contents.
+              </p>
+              {passwordPrompt.error && (
+                <div style={{ color: '#ef4444', fontSize: 12, marginBottom: 10, fontWeight: 500 }}>
+                  {passwordPrompt.error}
+                </div>
+              )}
+              <div className="form-group">
+                <input
+                  type="password"
+                  placeholder="Enter PDF password..."
+                  autoFocus
+                  value={enteredPassword}
+                  onChange={(e) => setEnteredPassword(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') handleUnlockEncryptedDoc();
+                  }}
+                  style={{ width: '100%', fontSize: 14, padding: '8px 12px' }}
+                />
+              </div>
+              <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 14 }}>
+                <button className="tool-btn" onClick={() => setPasswordPrompt(null)}>
+                  Cancel
+                </button>
+                <button className="tool-btn primary" onClick={handleUnlockEncryptedDoc}>
+                  Unlock PDF
+                </button>
+              </div>
             </div>
           </div>
         </div>

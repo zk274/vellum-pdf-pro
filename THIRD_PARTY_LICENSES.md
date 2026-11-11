@@ -93,3 +93,4 @@ Vellum PDF Pro may interact with the following system-installed binaries when av
 
 - **DejaVu Fonts (DejaVu Sans, DejaVu Serif)**: Licensed under the **DejaVu Fonts License / Bitstream Vera License**. Freely redistributable and embeddable in PDF documents without copyright fee.
 - **Standard Base 14 PDF Fonts (Helvetica, Times-Roman, Courier)**: Metric definitions and core glyph mappings conform to the ISO 32000-1 specification.
+

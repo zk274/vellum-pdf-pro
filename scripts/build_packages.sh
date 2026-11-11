@@ -10,12 +10,12 @@ RELEASE_DIR="$ROOT_DIR/release"
 BUILD_TMP="$(mktemp -d /tmp/vellum_pkg_XXXXXX)"
 trap 'rm -rf "$BUILD_TMP"' EXIT
 
-echo "[1/5] Building production frontend bundle..."
-npm run build
-
 mkdir -p "$RELEASE_DIR"
 
-echo "[2/5] Generating application icon..."
+echo "[1/6] Building production frontend bundle..."
+npm run build
+
+echo "[2/6] Generating application icon..."
 "$ROOT_DIR/.venv/bin/python" - <<'PY' "$BUILD_TMP/vellum-pdf-pro.png"
 import sys
 from PIL import Image, ImageDraw
@@ -31,34 +31,63 @@ draw.rectangle([74, 168, 142, 182], fill=(220, 38, 38, 255))
 img.save(sys.argv[1], format="PNG")
 PY
 
-echo "[3/5] Assembling application tree..."
-APP_STAGE="$BUILD_TMP/app_payload"
-mkdir -p "$APP_STAGE"
-cp -r "$ROOT_DIR/dist" "$APP_STAGE/"
-cp -r "$ROOT_DIR/electron" "$APP_STAGE/"
-cp -r "$ROOT_DIR/backend" "$APP_STAGE/"
-cp "$ROOT_DIR/package.json" "$APP_STAGE/"
+echo "[3/6] Assembling completely self-contained application payload..."
+APP_STAGE="$BUILD_TMP/payload"
+mkdir -p "$APP_STAGE/electron" "$APP_STAGE/app" "$APP_STAGE/python"
 
-# Create launcher script that invokes Electron + local Python engine
-cat > "$BUILD_TMP/vellum-launcher.sh" <<EOF
+# 1. Electron Runtime
+echo " -> Bundling Electron binary and native frameworks..."
+cp -r "$ROOT_DIR/node_modules/electron/dist/"* "$APP_STAGE/electron/"
+
+# 2. Vellum Application Code
+echo " -> Bundling application code (dist, electron, backend)..."
+cp -r "$ROOT_DIR/dist" "$APP_STAGE/app/"
+cp -r "$ROOT_DIR/electron" "$APP_STAGE/app/"
+cp -r "$ROOT_DIR/backend" "$APP_STAGE/app/"
+cp "$ROOT_DIR/package.json" "$APP_STAGE/app/"
+
+# 3. Python 3.11 Runtime & Complete Site-Packages Engine
+echo " -> Bundling standalone Python 3.11 runtime..."
+cp -r /home/zk/.local/share/uv/python/cpython-3.11.15-linux-x86_64-gnu/* "$APP_STAGE/python/"
+
+echo " -> Bundling all Python dependencies (PyMuPDF, pikepdf, pyHanko, pdf2docx, FastAPI, RapidOCR)..."
+mkdir -p "$APP_STAGE/python/lib/python3.11/site-packages"
+cp -r "$ROOT_DIR/.venv/lib/python3.11/site-packages/"* "$APP_STAGE/python/lib/python3.11/site-packages/"
+
+# Clean cache files to optimize package size
+find "$APP_STAGE" -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
+find "$APP_STAGE" -type f -name "*.pyc" -delete 2>/dev/null || true
+
+# Standalone Launcher Script
+cat > "$BUILD_TMP/vellum-launcher.sh" << 'EOF'
 #!/usr/bin/env bash
 set -e
-SOURCE_ROOT="${ROOT_DIR}"
-PAYLOAD_DIR="\$(cd "\$(dirname "\${BASH_SOURCE[0]}")" && pwd)"
+
+# Determine installation root
+SELF_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 if [ -d "/opt/vellum-pdf-pro/payload" ]; then
-  APP_DIR="/opt/vellum-pdf-pro/payload"
-elif [ -d "\$PAYLOAD_DIR/usr/lib/vellum-pdf-pro" ]; then
-  APP_DIR="\$PAYLOAD_DIR/usr/lib/vellum-pdf-pro"
+  BASE="/opt/vellum-pdf-pro/payload"
+elif [ -d "$SELF_DIR/../lib/vellum-pdf-pro" ]; then
+  BASE="$SELF_DIR/../lib/vellum-pdf-pro"
+elif [ -d "$APPDIR/usr/lib/vellum-pdf-pro" ]; then
+  BASE="$APPDIR/usr/lib/vellum-pdf-pro"
+elif [ -d "$SELF_DIR/payload" ]; then
+  BASE="$SELF_DIR/payload"
 else
-  APP_DIR="\$SOURCE_ROOT"
+  BASE="/opt/vellum-pdf-pro/payload"
 fi
-export VELLUM_PORT="\${VELLUM_PORT:-18420}"
-export PYTHONPATH="\$APP_DIR:\${PYTHONPATH:-}"
-if [ -x "$ROOT_DIR/node_modules/electron/dist/electron" ]; then
-  exec "$ROOT_DIR/node_modules/electron/dist/electron" --no-sandbox "\$APP_DIR/electron/main.cjs" "\$@"
-else
-  exec electron --no-sandbox "\$APP_DIR/electron/main.cjs" "\$@"
+
+export VELLUM_PORT="${VELLUM_PORT:-18420}"
+export VELLUM_PYTHON="$BASE/python/bin/python3.11"
+export PYTHONPATH="$BASE/app:$BASE/python/lib/python3.11/site-packages:${PYTHONPATH:-}"
+export ELECTRON_RUN_AS_NODE=""
+
+ELECTRON_BIN="$BASE/electron/electron"
+if [ ! -x "$ELECTRON_BIN" ]; then
+  ELECTRON_BIN="electron"
 fi
+
+exec "$ELECTRON_BIN" --no-sandbox "$BASE/app/electron/main.cjs" "$@"
 EOF
 chmod +x "$BUILD_TMP/vellum-launcher.sh"
 
@@ -75,7 +104,7 @@ MimeType=application/pdf;
 StartupNotify=true
 EOF
 
-echo "[4/5] Building Debian package (.deb)..."
+echo "[4/6] Building Debian package (.deb)..."
 DEB_ROOT="$BUILD_TMP/deb_root"
 mkdir -p "$DEB_ROOT/DEBIAN"
 mkdir -p "$DEB_ROOT/opt/vellum-pdf-pro/payload"
@@ -97,35 +126,50 @@ Priority: optional
 Architecture: amd64
 Installed-Size: ${INSTALLED_KB}
 Maintainer: Vellum PDF Engineering <engineering@vellumpdf.linux>
-Depends: python3 (>= 3.11), libgtk-3-0t64 | libgtk-3-0, libnss3, libasound2t64 | libasound2
+Depends: libgtk-3-0t64 | libgtk-3-0, libnss3, libasound2t64 | libasound2
+Recommends: tesseract-ocr, libreoffice-core
 Description: Vellum PDF Pro - Professional Linux Desktop PDF Editor
- Full-featured offline Linux PDF editor supporting direct content stream
- text and image editing, page organization, annotations, interactive
- AcroForms, X.509 PKCS#12 cryptographic digital signatures, offline neural
- OCR, permanent content redaction, PDF/A-2b archival, and document comparison.
+ Completely self-contained Linux desktop PDF editor. Bundles the Electron
+ desktop shell, embedded CPython 3.11 runtime, and high-performance PDF
+ processing engines (PyMuPDF, pikepdf, pyHanko, pdf2docx, RapidOCR).
+ Requires no external python virtual environments or node package installations.
 EOF
 
 DEB_OUT="$RELEASE_DIR/vellum-pdf-pro_${VERSION}_amd64.deb"
-dpkg-deb --root-owner-group --build "$DEB_ROOT" "$DEB_OUT"
+dpkg-deb -Zzstd -z1 --root-owner-group --build "$DEB_ROOT" "$DEB_OUT"
 
-echo "[5/5] Building Linux AppImage (.AppImage)..."
+echo "[5/6] Building Linux AppImage (.AppImage)..."
 APPDIR="$BUILD_TMP/Vellum_PDF_Pro.AppDir"
 mkdir -p "$APPDIR/usr/bin"
 mkdir -p "$APPDIR/usr/lib/vellum-pdf-pro"
 cp -r "$APP_STAGE/"* "$APPDIR/usr/lib/vellum-pdf-pro/"
-cp "$BUILD_TMP/vellum-launcher.sh" "$APPDIR/AppRun"
+
+# AppRun script in AppImage root
+cat > "$APPDIR/AppRun" << 'EOF'
+#!/usr/bin/env bash
+set -e
+APPDIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+BASE="$APPDIR/usr/lib/vellum-pdf-pro"
+
+export VELLUM_PORT="${VELLUM_PORT:-18420}"
+export VELLUM_PYTHON="$BASE/python/bin/python3.11"
+export PYTHONPATH="$BASE/app:$BASE/python/lib/python3.11/site-packages:${PYTHONPATH:-}"
+export ELECTRON_RUN_AS_NODE=""
+
+exec "$BASE/electron/electron" --no-sandbox "$BASE/app/electron/main.cjs" "$@"
+EOF
 chmod +x "$APPDIR/AppRun"
 cp "$BUILD_TMP/vellum-pdf-pro.desktop" "$APPDIR/vellum-pdf-pro.desktop"
 cp "$BUILD_TMP/vellum-pdf-pro.png" "$APPDIR/vellum-pdf-pro.png"
+ln -sf usr/lib/vellum-pdf-pro/app/electron "$APPDIR/electron"
 
 RUNTIME_BIN="/home/zk/.cache/electron-builder/appimage-12.0.1/appimage-12.0.1-qkv17/runtime-x64"
 SQUASHFS_IMG="$BUILD_TMP/appdir.squashfs"
-mksquashfs "$APPDIR" "$SQUASHFS_IMG" -root-owned -noappend -quiet -comp gzip
+mksquashfs "$APPDIR" "$SQUASHFS_IMG" -comp zstd -Xcompression-level 1 -root-owned -noappend -quiet
 
 APPIMAGE_OUT="$RELEASE_DIR/Vellum_PDF_Pro-${VERSION}-x86_64.AppImage"
 cat "$RUNTIME_BIN" "$SQUASHFS_IMG" > "$APPIMAGE_OUT"
 chmod +x "$APPIMAGE_OUT"
 
-echo "Build complete:"
+echo "[6/6] Build complete!"
 ls -lh "$DEB_OUT" "$APPIMAGE_OUT"
-

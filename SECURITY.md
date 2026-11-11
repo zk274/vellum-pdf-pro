@@ -34,3 +34,4 @@ If you discover a security vulnerability (such as a buffer overflow in PDF parsi
    - Minimal reproducible test case (e.g. sample PDF file).
    - Expected impact and affected platforms.
 4. We acknowledge receipt within 48 hours and aim to provide a remediation patch within 14 business days.
+
