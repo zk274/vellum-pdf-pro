@@ -46,6 +46,10 @@ mkdir -p "$APP_STAGE/electron" "$APP_STAGE/app" "$APP_STAGE/python"
 
 # 1. Electron Runtime
 echo " -> Bundling Electron binary and native frameworks..."
+if [ ! -d "$ROOT_DIR/node_modules/electron/dist" ] || [ -z "$(ls -A "$ROOT_DIR/node_modules/electron/dist" 2>/dev/null)" ]; then
+  echo "    Electron binary not found in node_modules/electron/dist, running install script..."
+  node "$ROOT_DIR/node_modules/electron/install.js"
+fi
 cp -r "$ROOT_DIR/node_modules/electron/dist/"* "$APP_STAGE/electron/"
 
 # 2. Vellum Application Code

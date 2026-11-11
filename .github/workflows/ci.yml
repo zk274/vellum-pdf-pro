@@ -45,7 +45,9 @@ jobs:
           pip install -r requirements.txt
 
       - name: Install Node Dependencies
-        run: npm ci
+        run: |
+          npm ci
+          node node_modules/electron/install.js
 
       - name: Run Backend Engine Automated Tests
         run: pytest -v
