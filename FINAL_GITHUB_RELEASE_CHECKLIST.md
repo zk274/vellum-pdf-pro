@@ -74,3 +74,4 @@ In the GitHub repository interface:
 ## 4. Remaining Operational Considerations
 - **Root-Level `sudo dpkg -i` Testing**: The `.deb` package was verified via isolated rootless filesystem extraction and execution. If deploying to an actual machine with root privileges, run `sudo apt install ./vellum-pdf-pro_1.0.0_amd64.deb` to automatically satisfy any missing GTK3/NSS desktop libraries.
 - **Commercial Inquiries**: If any commercial users request closed-source redistribution or integration without AGPL-3.0 obligations, refer them to Artifex Software Inc. for a commercial PyMuPDF OEM license.
+

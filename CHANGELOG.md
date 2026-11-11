@@ -56,3 +56,4 @@ This is the first public beta release of **Vellum PDF Pro**, an offline-first Li
 - Polished properties inspector to auto-expand upon clicking any selectable text span or image.
 - Replaced unstyled browser `window.prompt` dialog with an integrated, dark-themed password decryption modal.
 - Enhanced `safe_save` to write atomically via `.vellum_save_*.pdf` with automatic `.bak` backup creation.
+

@@ -109,3 +109,4 @@ Upon your approval, the following automated commands will be executed:
 2. Push branch `main` to GitHub.
 3. Create and push tag `v1.0.0-beta.1`.
 4. Publish the GitHub Pre-release with release notes and attach `release/vellum-pdf-pro_1.0.0_amd64.deb`, `release/Vellum_PDF_Pro-1.0.0-x86_64.AppImage`, and `release/SHA256SUMS`.
+

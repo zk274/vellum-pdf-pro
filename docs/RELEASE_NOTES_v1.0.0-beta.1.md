@@ -66,3 +66,4 @@ chmod +x Vellum_PDF_Pro-1.0.0-x86_64.AppImage
 ## Feedback & Bug Reports
 
 Please report issues, document compatibility questions, or feature requests via GitHub Issues.
+
