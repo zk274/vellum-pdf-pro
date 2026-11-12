@@ -188,3 +188,4 @@ tests/test_pdf_engine_and_api.py::test_object_selection_moving_resizing_and_pers
 ---
 
 *Report prepared and verified on Linux desktop.*
+

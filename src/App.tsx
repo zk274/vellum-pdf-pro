@@ -998,7 +998,7 @@ export default function App() {
         setEditSpanText(data.text || '');
         setEditSpanFont(data.font || 'helv');
         setEditSpanSize(data.size || 12);
-        setEditSpanColor(data.color_hex || '#000000');
+        setEditSpanColor(data.color || data.color_hex || '#000000');
         setEditSpanBold(Boolean(data.bold));
         setEditSpanItalic(Boolean(data.italic));
         setEditSpanAlign(data.align || 'left');
@@ -1037,27 +1037,116 @@ export default function App() {
     ) => {
       if (!activeDoc) return;
       try {
+        const isTextSpan = obj.objectType === 'text_span';
+        const isTextBox = obj.objectType === 'textbox';
+
+        const textVal =
+          extraProps.text ??
+          (isTextSpan ? (obj.data?.text ?? editSpanText) : isTextBox ? obj.data?.text : undefined);
+        const fontVal =
+          extraProps.font_name ??
+          (isTextSpan
+            ? (obj.data?.font ?? editSpanFont)
+            : isTextBox
+            ? (obj.data?.font_name ?? obj.data?.font)
+            : undefined);
+        const sizeVal =
+          extraProps.font_size ??
+          (isTextSpan
+            ? (obj.data?.size ?? editSpanSize)
+            : isTextBox
+            ? (obj.data?.font_size ?? obj.data?.size)
+            : undefined);
+        const colorVal =
+          extraProps.color_hex ??
+          (isTextSpan
+            ? (obj.data?.color || obj.data?.color_hex || editSpanColor)
+            : isTextBox
+            ? (obj.data?.color_hex || obj.data?.color)
+            : undefined);
+        const boldVal =
+          extraProps.bold ??
+          (isTextSpan ? (obj.data?.bold ?? editSpanBold) : isTextBox ? obj.data?.bold : undefined);
+        const italicVal =
+          extraProps.italic ??
+          (isTextSpan ? (obj.data?.italic ?? editSpanItalic) : isTextBox ? obj.data?.italic : undefined);
+        const alignVal =
+          extraProps.align ??
+          (isTextSpan
+            ? (obj.data?.align ?? editSpanAlign ?? 'left')
+            : isTextBox
+            ? (obj.data?.align ?? 'left')
+            : undefined);
+        const origOrigin = isTextSpan ? (obj.data?.origin ?? undefined) : undefined;
+
         const res = await pdfApi.transformObject(activeDoc.doc_id, currentPage, {
           object_id: obj.objectId,
           object_type: obj.objectType,
           action,
           orig_bbox: obj.origBbox,
           new_bbox: newBbox,
+          orig_origin: origOrigin,
+          text: textVal,
+          font_name: fontVal,
+          font_size: sizeVal,
+          color_hex: colorVal,
+          bold: boldVal,
+          italic: italicVal,
+          align: alignVal,
           image_xref: obj.objectType === 'image' ? obj.data?.xref : undefined,
           ...extraProps,
         });
+
         await refreshDocState(activeDoc.doc_id, currentPage, res.summary);
+
         if (action === 'delete') {
           setSelectedObj(null);
+          setSelectedSpan(null);
           notify(`Deleted ${obj.objectType} object from page.`);
         } else if (action === 'duplicate') {
           notify(`Duplicated ${obj.objectType} object.`);
         } else {
+          let updatedBbox = [...newBbox] as [number, number, number, number];
+          let updatedData = { ...obj.data, ...extraProps, bbox: updatedBbox };
+
+          if (isTextSpan && res.objects?.text_spans) {
+            const matched = res.objects.text_spans.find(
+              (s) =>
+                s.id === obj.objectId ||
+                (s.text === textVal && Math.abs(s.bbox[0] - newBbox[0]) < 25 && Math.abs(s.bbox[1] - newBbox[1]) < 25)
+            );
+            if (matched) {
+              updatedBbox = [...matched.bbox];
+              updatedData = matched;
+              setSelectedSpan(matched);
+              setEditSpanText(matched.text);
+              setEditSpanFont(matched.font);
+              setEditSpanSize(matched.size);
+              setEditSpanColor(matched.color);
+              setEditSpanBold(matched.bold);
+              setEditSpanItalic(matched.italic);
+              setEditSpanBbox([...matched.bbox]);
+            }
+          } else if (isTextBox && res.objects?.vellum_boxes) {
+            const matched = res.objects.vellum_boxes.find((b) => b.id === obj.objectId);
+            if (matched) {
+              updatedBbox = [...matched.bbox];
+              updatedData = matched;
+            }
+          } else if (obj.objectType === 'shape' && res.objects?.vellum_shapes) {
+            const matched = res.objects.vellum_shapes.find((s) => s.id === obj.objectId);
+            if (matched) {
+              updatedBbox = [...matched.bbox];
+              updatedData = matched;
+            }
+          }
+
           setSelectedObj({
             ...obj,
-            origBbox: [...newBbox],
-            currentBbox: [...newBbox],
-            data: { ...obj.data, ...extraProps, bbox: newBbox },
+            objectId: updatedData.id || obj.objectId,
+            origBbox: updatedBbox,
+            currentBbox: updatedBbox,
+            data: updatedData,
           });
           notify(`Updated ${obj.objectType} position and geometry.`);
         }
@@ -1065,7 +1154,7 @@ export default function App() {
         notify(`Failed to transform ${obj.objectType}: ${err?.message || err}`, 'warn');
       }
     },
-    [activeDoc, currentPage, refreshDocState, notify]
+    [activeDoc, currentPage, refreshDocState, notify, editSpanText, editSpanFont, editSpanSize, editSpanColor, editSpanBold, editSpanItalic, editSpanAlign]
   );
 
   const handleStartDragMove = (e: React.MouseEvent) => {

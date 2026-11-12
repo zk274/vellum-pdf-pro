@@ -673,6 +673,16 @@ def edit_text_span(
         elif new_text and not keep_original_font:
             fallback_reason = "Font family/style changed by user; standard font applied."
 
+        # Capture any link annotations intersecting pdf_rect before _remove_glyphs removes them
+        affected_links: List[Dict[str, Any]] = []
+        try:
+            for lk in page.get_links():
+                lk_rect = pymupdf.Rect(lk["from"])
+                if lk_rect.intersects(pdf_rect) or (abs(lk_rect.x0 - pdf_rect.x0) < 15 and abs(lk_rect.y0 - pdf_rect.y0) < 15):
+                    affected_links.append(dict(lk))
+        except Exception:
+            affected_links = []
+
         _remove_glyphs(page, pdf_rect, line_dir=line_dir)
 
         if new_text:
@@ -741,6 +751,26 @@ def edit_text_span(
                     )
                 if fallback_used and not fallback_reason:
                     fallback_reason = "Original font could not be reused; standard font substituted."
+
+            # Restore or reposition affected link annotations
+            if affected_links:
+                for lk in affected_links:
+                    try:
+                        old_from = pymupdf.Rect(lk["from"])
+                        new_from = pymupdf.Rect(
+                            old_from.x0 + delta.x,
+                            old_from.y0 + delta.y,
+                            old_from.x1 + delta.x,
+                            old_from.y1 + delta.y,
+                        )
+                        lk_data: Dict[str, Any] = {"kind": lk.get("kind", pymupdf.LINK_URI), "from": new_from}
+                        if lk.get("uri"):
+                            lk_data["uri"] = lk["uri"]
+                        elif lk.get("page") is not None and lk.get("page") >= 0:
+                            lk_data["page"] = lk["page"]
+                        page.insert_link(lk_data)
+                    except Exception:
+                        pass
 
         out = doc.tobytes(garbage=1, deflate=True)
         return {
@@ -1091,9 +1121,10 @@ def transform_object(
     page_index: int,
     object_id: str,
     object_type: str,
-    action: str,  # "transform" | "delete" | "duplicate" | "update_style"
+    action: str,  # "transform" | "move" | "delete" | "duplicate" | "update_style"
     orig_bbox: List[float],
     new_bbox: Optional[List[float]] = None,
+    orig_origin: Optional[List[float]] = None,
     text: Optional[str] = None,
     font_name: Optional[str] = None,
     font_size: Optional[float] = None,
@@ -1338,21 +1369,83 @@ def transform_object(
             if action == "delete":
                 res = edit_text_span(pdf_bytes, page_index, orig_bbox=orig_bbox, new_text="")
                 return res["pdf_bytes"]
-            elif action in ("transform", "move", "update_style"):
-                res = edit_text_span(
-                    pdf_bytes,
-                    page_index,
-                    orig_bbox=orig_bbox,
-                    new_bbox=new_bbox,
-                    new_text=text if text is not None else "",
-                    font_name=font_name,
-                    font_size=font_size or 12.0,
-                    color_hex=color_hex or "#000000",
-                    bold=bold or False,
-                    italic=italic or False,
-                    align=align or "left",
-                )
-                return res["pdf_bytes"]
+
+            # If text or styling is not fully provided by caller, look up existing span from the page
+            matched_span: Optional[Dict[str, Any]] = None
+            try:
+                page_objs = inspect_page_objects(pdf_bytes, page_index)
+                for s in page_objs.get("text_spans", []):
+                    if s.get("id") == object_id:
+                        matched_span = s
+                        break
+                    sb = s.get("bbox", [])
+                    if len(sb) == 4 and abs(sb[0] - orig_bbox[0]) < 12 and abs(sb[1] - orig_bbox[1]) < 12:
+                        matched_span = s
+                        break
+            except Exception:
+                matched_span = None
+
+            if matched_span:
+                if text is None:
+                    text = matched_span.get("text", "")
+                if not font_name:
+                    font_name = matched_span.get("font", "helv")
+                if not font_size:
+                    font_size = matched_span.get("size", 12.0)
+                if not color_hex:
+                    color_hex = matched_span.get("color", "#000000")
+                if bold is None:
+                    bold = matched_span.get("bold", False)
+                if italic is None:
+                    italic = matched_span.get("italic", False)
+                if orig_origin is None:
+                    orig_origin = matched_span.get("origin")
+                actual_span_bbox = matched_span.get("bbox") or orig_bbox
+            else:
+                actual_span_bbox = orig_bbox
+
+            # Atomic guard: on move/transform/style update, never erase if text is missing
+            if not text:
+                return pdf_bytes
+
+            if action in ("transform", "move", "update_style"):
+                target_bbox = new_bbox if new_bbox else orig_bbox
+                try:
+                    res = edit_text_span(
+                        pdf_bytes,
+                        page_index,
+                        orig_bbox=actual_span_bbox,
+                        new_bbox=target_bbox,
+                        orig_origin=orig_origin,
+                        new_text=text,
+                        original_font=font_name,
+                        font_name=font_name,
+                        font_size=font_size or 12.0,
+                        color_hex=color_hex or "#000000",
+                        bold=bold or False,
+                        italic=italic or False,
+                        align=align or "left",
+                        keep_original_font=True,
+                    )
+                    transformed_bytes = res["pdf_bytes"]
+
+                    # Atomic verification: verify text exists in resulting document
+                    verify_doc = pymupdf.open(stream=transformed_bytes, filetype="pdf")
+                    try:
+                        p_verify = verify_doc[page_index]
+                        page_txt = p_verify.get_text()
+                        first_token = text.strip().split()[0] if text.strip() else ""
+                        if first_token and first_token not in page_txt:
+                            # If text was lost, abort atomically and restore original document
+                            return pdf_bytes
+                    finally:
+                        verify_doc.close()
+
+                    return transformed_bytes
+                except Exception:
+                    # On unexpected error, return original bytes untouched
+                    return pdf_bytes
+
             elif action == "duplicate":
                 target_bbox = [orig_bbox[0] + 20, orig_bbox[1] + 20, orig_bbox[2] + 20, orig_bbox[3] + 20]
                 return add_text_object(

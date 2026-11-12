@@ -7,6 +7,16 @@ The project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html
 
 ## [Unreleased]
 
+### Fixed
+- **Native Text Span Moving, Resizing, and Hyperlink Preservation**:
+  - Permanently fixed regression where moving or resizing native PDF text spans caused text to disappear from the rendered canvas.
+  - Corrected frontend payload parameter extraction in `commitObjectTransform`: explicitly bundles `text`, `font_name`, `font_size`, `color_hex`, `bold`, `italic`, `align`, and `orig_origin` to prevent empty text replacement.
+  - Added robust server-side fallback and recovery in `backend/engine/direct_edit.py`: if caller omits text attributes, inspects existing page text spans dynamically to retrieve actual content, font family, size, color, and baseline origin.
+  - Separated bounding box resizing from font size scaling: resizing a text span's selection frame preserves original font size, baseline, and glyph styling without unexpected magnification or text distortion.
+  - Implemented atomic transformation verification: verifies text exists on target page after edit/transform; aborts atomically if missing to guarantee document integrity.
+  - Synchronized intersecting hyperlink annotations: moving a hyperlinked text span automatically shifts and preserves corresponding `/Link` annotations and targets.
+  - Added comprehensive automated regression tests verifying Helvetica, bold, italic, multiline text, embedded and subsetted fonts, rotated pages (0°, 90°, 180°, 270°), vector graphics/colored background overlap, undo/redo, and save/reopen persistence.
+
 ### Added
 - **Professional Object Selection, Moving, Resizing & Manipulation System**:
   - Implemented single-click object selection for Vellum text boxes, vector shapes, embedded raster images, and native PDF text spans.

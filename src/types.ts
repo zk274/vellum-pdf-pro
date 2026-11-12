@@ -123,6 +123,7 @@ export interface TransformObjectRequest {
   action: 'transform' | 'delete' | 'duplicate' | 'update_style';
   orig_bbox: [number, number, number, number];
   new_bbox?: [number, number, number, number] | null;
+  orig_origin?: [number, number] | null;
   text?: string;
   font_name?: string;
   font_size?: number;

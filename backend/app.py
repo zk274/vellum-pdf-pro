@@ -189,6 +189,7 @@ class TransformObjectRequest(BaseModel):
     action: str  # "transform" | "delete" | "duplicate" | "update_style"
     orig_bbox: List[float]
     new_bbox: Optional[List[float]] = None
+    orig_origin: Optional[List[float]] = None
     text: Optional[str] = None
     font_name: Optional[str] = None
     font_size: Optional[float] = None
@@ -878,6 +879,7 @@ def api_transform_object(doc_id: str, page_index: int, req: TransformObjectReque
         action=req.action,
         orig_bbox=req.orig_bbox,
         new_bbox=req.new_bbox,
+        orig_origin=req.orig_origin,
         text=req.text,
         font_name=req.font_name,
         font_size=req.font_size,
