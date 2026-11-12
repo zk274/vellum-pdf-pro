@@ -5,6 +5,10 @@ const http = require('http');
 const net = require('net');
 const fs = require('fs');
 
+if (app && typeof app.setName === 'function') {
+  app.setName('vellum-pdf-pro');
+}
+
 let BACKEND_PORT = parseInt(process.env.VELLUM_PORT || '18420', 10);
 let BACKEND_URL = `http://127.0.0.1:${BACKEND_PORT}`;
 
@@ -384,6 +388,12 @@ async function createWindow() {
       nodeIntegration: false,
     },
   });
+
+  if (fs.existsSync(appIconPath)) {
+    try {
+      mainWindow.setIcon(appIconPath);
+    } catch (_) {}
+  }
 
   // Track window maximize / restore state to notify renderer
   mainWindow.on('maximize', () => {

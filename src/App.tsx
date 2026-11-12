@@ -77,6 +77,7 @@ import {
   TextSpanObject,
   ThumbnailItem,
 } from './types';
+import vellumAppIcon from './assets/branding/vellum-app-icon.png';
 
 type SubTool =
   | 'select'
@@ -4135,9 +4136,15 @@ export default function App() {
                 }}
               >
                 <img
-                  src="/branding/vellum-app-icon.png"
+                  src={vellumAppIcon}
                   alt="Vellum PDF Pro Icon"
-                  style={{ width: 64, height: 64, borderRadius: 12, flexShrink: 0, boxShadow: '0 4px 12px rgba(0,0,0,0.25)' }}
+                  style={{
+                    width: 64,
+                    height: 64,
+                    objectFit: 'contain',
+                    flexShrink: 0,
+                    filter: 'drop-shadow(0 4px 8px rgba(0, 0, 0, 0.25))',
+                  }}
                 />
                 <div>
                   <div style={{ fontSize: 18, fontWeight: 700, letterSpacing: '-0.02em', color: 'var(--text-primary)' }}>

@@ -81,9 +81,11 @@ A standalone Python generation script was created to deterministically rasterize
 - **Dimensions:** Sized at `18×18 px`, preserving critical horizontal space for the File/Edit/View menus, document title, search bar, and window controls.
 - **Interactivity:** Clicking the brand badge opens the official About modal. Hover effects and tooltips (`About Vellum PDF Pro`) are fully preserved.
 
-### 4.2 Interactive About Modal
-- **File:** `src/App.tsx`
-- **Visuals:** Features the official 64×64 pixel rounded squircle tile icon (`/branding/vellum-app-icon.png` / `/branding/vellum-app-icon.svg`) with drop shadow.
+### 4.2 Interactive About Modal & Bundled Asset Handling
+- **File:** `src/App.tsx`, `src/assets/branding/vellum-app-icon.png`
+- **Asset Resolution Fix:** Resolved broken image symbol by converting the previous root-relative path (`/branding/vellum-app-icon.png`, which failed under `file://` protocol in packaged Electron) into a Vite-bundled module import (`import vellumAppIcon from './assets/branding/vellum-app-icon.png'`). In production, Vite bundles the asset to `./assets/vellum-app-icon-[hash].png` via `new URL(..., import.meta.url).href`, ensuring reliable relative loading across development, Electron unpackaged, `.deb` installation, and AppImage Squashfs mount points.
+- **Visuals & Styling:** Displays the approved 64×64 pixel rounded squircle tile icon with the lighter cobalt-navy gradient (`#285C97` → `#19477F`). Replaced rectangular bounding `boxShadow` with alpha-aware CSS `filter: drop-shadow(0 4px 8px rgba(0,0,0,0.25))` and `objectFit: 'contain'`, properly preserving the icon squircle's corner transparency without rectangular box-shadow clipping.
+- **Verification:** Verified via Chrome DevTools Protocol (CDP) in live packaged Electron run: `complete: true`, `naturalWidth: 1024`, `naturalHeight: 1024`, `width: 64`, `height: 64`.
 - **Metadata Displayed:**
   - Official Application Name: **Vellum PDF Pro**
   - Subtitle: *Professional Offline Linux Desktop PDF Editor*
@@ -95,7 +97,7 @@ A standalone Python generation script was created to deterministically rasterize
 
 ### 4.3 Electron Native Window & System Chrome
 - **File:** `electron/main.cjs`
-- **Configuration:** Updated `BrowserWindow` constructor to dynamically locate and set `icon: appIconPath` using `resources/icons/vellum-256.png` with fallbacks.
+- **Configuration:** Updated `BrowserWindow` constructor to dynamically locate and set `icon: appIconPath` using `resources/icons/vellum-256.png` with fallbacks, followed by `mainWindow.setIcon(appIconPath)`. Configured `app.setName('vellum-pdf-pro')` to align with the desktop entry `StartupWMClass`.
 - **Desktop Behavior:**
   - In Ubuntu GNOME (Wayland and X11), assigns the official icon to the running window, Ubuntu dock, task-switcher (Alt+Tab), and application titlebar previews.
 
@@ -135,18 +137,20 @@ Both Linux distribution packages were updated in `scripts/build_packages.sh`:
 3. **Legacy Pixmaps Fallback:**
    - `/usr/share/pixmaps/vellum-pdf-pro.png` (256×256)
 4. **Desktop Entry:**
-   - `/usr/share/applications/vellum-pdf-pro.desktop` configured with `Icon=vellum-pdf-pro`.
+   - `/usr/share/applications/vellum-pdf-pro.desktop` configured with `Icon=vellum-pdf-pro` and `StartupWMClass=vellum-pdf-pro`.
+5. **Debian Maintainer Scripts (`DEBIAN/postinst` & `DEBIAN/postrm`):**
+   - Automatically executes `gtk-update-icon-cache -q -t -f /usr/share/icons/hicolor` and `update-desktop-database -q /usr/share/applications` on package install and remove, ensuring Ubuntu desktop immediately reflects the new cobalt-navy launcher icon without stale caching.
 
 ### 5.2 AppImage Package
 1. **Root Assets:**
-   - `vellum-pdf-pro.png` (256×256 icon at root)
+   - `vellum-pdf-pro.png` (512×512 icon at root)
    - `.DirIcon` (symlink / copy of 256×256 icon for AppImage desktop integration)
    - `vellum-pdf-pro.svg` (scalable vector icon at root)
 2. **AppDir Hicolor Tree:**
    - `$APPDIR/usr/share/icons/hicolor/<size>x<size>/apps/vellum-pdf-pro.png` (16px to 512px)
    - `$APPDIR/usr/share/icons/hicolor/scalable/apps/vellum-pdf-pro.svg`
 3. **Desktop Entry:**
-   - `$APPDIR/vellum-pdf-pro.desktop` configured with `Icon=vellum-pdf-pro`.
+   - `$APPDIR/vellum-pdf-pro.desktop` configured with `Icon=vellum-pdf-pro` and `StartupWMClass=vellum-pdf-pro`.
 
 ---
 
@@ -156,12 +160,13 @@ Both Linux distribution packages were updated in `scripts/build_packages.sh`:
 - **Dark Theme:** Tested against background `#0f172a` (Slate 900) and `#1e293b` (Slate 800). The cobalt-navy background `#285C97` / `#19477F` provides clear contrast with adjacent dark slate elements while the dark-blue V remains sharp and distinct.
 - **Light Theme:** Tested against background `#ffffff` and `#f1f5f9` (Slate 100). The icon tile creates a well-defined boundary with clear visibility.
 - **Header Spacing:** The 18×18 px mark badge occupies no more space than the previous placeholder icon, leaving ample room for all seven top-level menus and window controls.
+- **About Modal Logo Rendering:** Verified via automated CDP inspection in packaged Electron: `complete: true`, `naturalWidth: 1024`, `naturalHeight: 1024`, `rendered: 64x64`, `currentSrc: file:///.../dist/assets/vellum-app-icon-D7cVUfgL.png`. The logo renders with the approved cobalt-navy gradient, precise squircle geometry, and alpha-blended drop shadow.
 
 ### 6.2 Screenshots Captured
 The following visual captures document the branded interface:
 1. `docs/screenshots/branded-header-dark.png`: Dark mode frameless header displaying the official Vellum mark badge and menus.
 2. `docs/screenshots/branded-header-light.png`: Light mode frameless header with dark-slate text and branded mark badge.
-3. `docs/screenshots/branded-about-modal-dark.png`: Dark mode About modal featuring the 64×64 squircle tile icon, official typography, version, license, and engine details.
+3. `docs/screenshots/branded-about-modal-dark.png`: Dark mode About modal featuring the verified 64×64 squircle tile icon, official typography, version, license, and engine details.
 4. `docs/screenshots/branded-about-modal-light.png`: Light mode About modal showing high-contrast rendering.
 
 ### 6.3 Automated Test Suite
@@ -173,8 +178,12 @@ tests/test_backend_startup_lifecycle.py::test_multi_instance_backend_isolation P
 tests/test_backend_startup_lifecycle.py::test_packaged_runtime_path_resolution PASSED
 tests/test_backend_startup_lifecycle.py::test_clean_process_shutdown PASSED
 tests/test_pdf_engine_and_api.py (15 tests) PASSED
-======================= 20 passed, 2 warnings in 28.03s ========================
+======================= 20 passed, 2 warnings in 28.63s ========================
 ```
+
+### 6.4 Built Packages & Checksums
+- `release/vellum-pdf-pro_1.0.0_amd64.deb`: `d1aa4ca7f37ea2eb074ab9ff16ad18c919d4f9010a722276d9f9e95b122f1b75`
+- `release/Vellum_PDF_Pro-1.0.0-x86_64.AppImage`: `62432bcc6d34f304e94c483d60536a1be37543da9c6863b15057290ad620bd11`
 
 ---
 

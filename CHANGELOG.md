@@ -37,6 +37,14 @@ The project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html
   - Polished in-app React menu bar as the single primary navigation header across File, Edit, View, Document, Tools, Window, and Help.
 
 ### Fixed
+- **About Dialog Bundled Asset Resolution & Transparency**:
+  - Fixed broken image icon and `ERR_FILE_NOT_FOUND` in About Vellum PDF Pro modal caused by root-relative web path (`/branding/vellum-app-icon.png`) when loading under Electron's `file://` protocol.
+  - Converted logo reference to a Vite-bundled module asset import (`import vellumAppIcon from './assets/branding/vellum-app-icon.png'`), generating reliable relative asset paths across both development and packaged production environments.
+  - Replaced bounding box shadow with CSS `filter: drop-shadow(0 4px 8px rgba(0, 0, 0, 0.25))` and `objectFit: 'contain'`, properly preserving squircle corner transparency without rectangular box-shadow clipping.
+- **Ubuntu Desktop Launcher & Dock Integration**:
+  - Added `StartupWMClass=vellum-pdf-pro` to the desktop entry file for both Debian and AppImage packages, ensuring instant window-to-launcher matching in Ubuntu dock and GNOME Shell.
+  - Added Debian maintainer scripts (`DEBIAN/postinst` and `DEBIAN/postrm`) executing `gtk-update-icon-cache` and `update-desktop-database` on install and removal, ensuring Ubuntu displays updated cobalt-navy branding rather than stale cached icons.
+  - Configured `app.setName('vellum-pdf-pro')` and runtime `mainWindow.setIcon()` in Electron main process.
 - **Packaging Robustness**:
   - Added atomic unlinking (`rm -f "$APPIMAGE_OUT"`) prior to binary concatenation in `scripts/build_packages.sh` to prevent `Text file busy` (`ETXTBSY`) errors when building packages while an AppImage is active.
 - **Automated Regression Coverage**:

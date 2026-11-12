@@ -116,6 +116,7 @@ Type=Application
 Categories=Office;Viewer;Graphics;
 MimeType=application/pdf;
 StartupNotify=true
+StartupWMClass=vellum-pdf-pro
 EOF
 
 echo "[4/6] Building Debian package (.deb)..."
@@ -156,6 +157,30 @@ Description: Vellum PDF Pro - Professional Linux Desktop PDF Editor
  processing engines (PyMuPDF, pikepdf, pyHanko, pdf2docx, RapidOCR).
  Requires no external python virtual environments or node package installations.
 EOF
+
+cat > "$DEB_ROOT/DEBIAN/postinst" <<'EOF'
+#!/bin/sh
+set -e
+if which gtk-update-icon-cache >/dev/null 2>&1; then
+    gtk-update-icon-cache -q -t -f /usr/share/icons/hicolor 2>/dev/null || true
+fi
+if which update-desktop-database >/dev/null 2>&1; then
+    update-desktop-database -q /usr/share/applications 2>/dev/null || true
+fi
+EOF
+chmod 755 "$DEB_ROOT/DEBIAN/postinst"
+
+cat > "$DEB_ROOT/DEBIAN/postrm" <<'EOF'
+#!/bin/sh
+set -e
+if which gtk-update-icon-cache >/dev/null 2>&1; then
+    gtk-update-icon-cache -q -t -f /usr/share/icons/hicolor 2>/dev/null || true
+fi
+if which update-desktop-database >/dev/null 2>&1; then
+    update-desktop-database -q /usr/share/applications 2>/dev/null || true
+fi
+EOF
+chmod 755 "$DEB_ROOT/DEBIAN/postrm"
 
 DEB_OUT="$RELEASE_DIR/vellum-pdf-pro_${VERSION}_amd64.deb"
 dpkg-deb -Zzstd -z1 --root-owner-group --build "$DEB_ROOT" "$DEB_OUT"
