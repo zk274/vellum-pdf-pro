@@ -360,12 +360,20 @@ function buildNativeLinuxMenu() {
 async function createWindow() {
   buildNativeLinuxMenu();
 
+  const candidateIconPaths = [
+    path.join(__dirname, '..', 'resources', 'icons', 'vellum-256.png'),
+    path.join(__dirname, '..', '..', 'resources', 'icons', 'vellum-256.png'),
+    '/usr/share/icons/hicolor/256x256/apps/vellum-pdf-pro.png',
+  ];
+  const appIconPath = candidateIconPaths.find((p) => fs.existsSync(p)) || candidateIconPaths[0];
+
   mainWindow = new BrowserWindow({
     width: 1520,
     height: 940,
     minWidth: 1024,
     minHeight: 680,
     title: 'Vellum PDF Pro — Linux Desktop PDF Editor',
+    icon: appIconPath,
     backgroundColor: '#0f172a',
     frame: false,
     resizable: true,

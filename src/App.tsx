@@ -114,6 +114,42 @@ interface DraftTextBoxState {
   align: 'left' | 'center' | 'right' | 'justify';
 }
 
+const VellumMarkIcon: React.FC<{ size?: number; className?: string }> = ({ size = 18, className = '' }) => (
+  <svg
+    xmlns="http://www.w3.org/2000/svg"
+    width={size}
+    height={size}
+    viewBox="0 0 256 256"
+    className={className}
+    style={{ display: 'block', flexShrink: 0 }}
+    aria-hidden="true"
+  >
+    <defs>
+      <linearGradient id="vellumBlueBlade" x1="0" x2="1" y1="1" y2="0">
+        <stop offset="0" stopColor="#0063F4" />
+        <stop offset="1" stopColor="#11A1FF" />
+      </linearGradient>
+      <linearGradient id="vellumNavyBlade" x1="0" x2="1" y1="0" y2="1">
+        <stop stopColor="#0B3B7E" />
+        <stop offset="1" stopColor="#061A43" />
+      </linearGradient>
+      <linearGradient id="vellumPaperWhite" x1="0" x2="0" y1="0" y2="1">
+        <stop stopColor="#FFFFFF" />
+        <stop offset="1" stopColor="#EAF1FE" />
+      </linearGradient>
+    </defs>
+    {/* Page rising from the arms of the V */}
+    <path d="M111 18 H180 L222 60 V133 L163 205 L112 155Z" fill="url(#vellumPaperWhite)" />
+    <path d="M180 18 L180 60 L222 60 Z" fill="#0575FF" />
+    <path d="M180 18 L180 60 L222 60" fill="none" stroke="#D3E4FF" strokeWidth="1.4" />
+    <path d="M133 79 H174 M133 98 H183 M133 117 H166" stroke="#8294AF" strokeWidth="8" strokeLinecap="round" />
+    {/* Left and right blades */}
+    <path d="M14 28 H72 Q84 28 91 39 L135 131 L117 239 Z" fill="url(#vellumNavyBlade)" />
+    <path d="M117 239 L211 73 L239 91 L163 228 Q157 239 145 239 Z" fill="url(#vellumBlueBlade)" />
+    <path d="M211 73 L239 91 L222 60 Z" fill="#0379FE" />
+  </svg>
+);
+
 export default function App() {
   const [theme, setTheme] = useState<'dark' | 'light'>('dark');
   const [engineReady, setEngineReady] = useState<boolean>(false);
@@ -1312,7 +1348,7 @@ export default function App() {
             title="Vellum PDF Pro — Click for About & Licensing"
             onClick={() => setShowAboutModal(true)}
           >
-            <FileCheck size={16} />
+            <VellumMarkIcon size={18} />
           </div>
 
           {/* Menu: File */}
@@ -4076,22 +4112,76 @@ export default function App() {
       {/* MODAL: ABOUT */}
       {showAboutModal && (
         <div className="modal-backdrop" onClick={() => setShowAboutModal(false)}>
-          <div className="modal-card" onClick={(e) => e.stopPropagation()} style={{ width: 500 }}>
+          <div className="modal-card" onClick={(e) => e.stopPropagation()} style={{ width: 540 }}>
             <div className="modal-header">
-              <span>About Vellum PDF Pro (Linux Desktop Edition)</span>
-              <button className="tab-close" onClick={() => setShowAboutModal(false)}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <VellumMarkIcon size={18} />
+                <span style={{ fontWeight: 600 }}>About Vellum PDF Pro</span>
+              </div>
+              <button className="tab-close" onClick={() => setShowAboutModal(false)} title="Close">
                 <X size={16} />
               </button>
             </div>
-            <div className="modal-body" style={{ lineHeight: 1.6 }}>
-              <p style={{ marginBottom: 8 }}>
-                <strong>Vellum PDF Pro v1.0.0</strong> is an offline-first Linux desktop PDF editor built with
-                Electron, React, TypeScript, and a hybrid Python 3.11 native PDF engine.
-              </p>
-              <p style={{ fontSize: 12, color: 'var(--text-secondary)' }}>
-                <strong>Engines:</strong> PyMuPDF (AGPL-3.0), pikepdf/QPDF (MPL-2.0), pyHanko (MIT),
-                RapidOCR/ONNXRuntime (Apache-2.0), pdfplumber (MIT), LibreOffice & Ghostscript.
-              </p>
+            <div className="modal-body" style={{ lineHeight: 1.6, display: 'flex', flexDirection: 'column', gap: 14 }}>
+              <div
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 16,
+                  padding: '14px 18px',
+                  background: 'var(--bg-hover)',
+                  borderRadius: 8,
+                  border: '1px solid var(--border-color)',
+                }}
+              >
+                <img
+                  src="/branding/vellum-app-icon.png"
+                  alt="Vellum PDF Pro Icon"
+                  style={{ width: 64, height: 64, borderRadius: 12, flexShrink: 0, boxShadow: '0 4px 12px rgba(0,0,0,0.25)' }}
+                />
+                <div>
+                  <div style={{ fontSize: 18, fontWeight: 700, letterSpacing: '-0.02em', color: 'var(--text-primary)' }}>
+                    Vellum PDF Pro
+                  </div>
+                  <div style={{ fontSize: 12, color: 'var(--accent)', fontWeight: 600, marginTop: 2 }}>
+                    v1.0.0-beta.2 · Linux Desktop Edition
+                  </div>
+                  <div style={{ fontSize: 11.5, color: 'var(--text-secondary)', marginTop: 4 }}>
+                    Free & Open Source Software · GNU AGPL-3.0
+                  </div>
+                </div>
+              </div>
+
+              <div>
+                <p style={{ margin: '0 0 8px', fontSize: 12.5, color: 'var(--text-primary)' }}>
+                  A professional, offline-first Linux desktop PDF editor built with Electron, React, TypeScript,
+                  and a high-performance Python 3.11 direct content stream editing engine.
+                </p>
+                <p style={{ margin: 0, fontSize: 11.5, color: 'var(--text-secondary)' }}>
+                  <strong>Core Engines:</strong> PyMuPDF (AGPL-3.0) · pikepdf/QPDF (MPL-2.0) · pyHanko (MIT) · RapidOCR (Apache-2.0) · ONNXRuntime (MIT) · pdf2docx (GPL-3.0) · ReportLab (BSD).
+                </p>
+              </div>
+
+              <div
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  paddingTop: 12,
+                  borderTop: '1px solid var(--border-color)',
+                  fontSize: 11.5,
+                  color: 'var(--text-secondary)',
+                }}
+              >
+                <span>© 2026 Vellum PDF Engineering · GNU AGPL-3.0</span>
+                <button
+                  className="btn"
+                  onClick={() => setShowAboutModal(false)}
+                  style={{ minWidth: 80, height: 28, fontSize: 12 }}
+                >
+                  Close
+                </button>
+              </div>
             </div>
           </div>
         </div>

@@ -15,7 +15,7 @@ mkdir -p "$RELEASE_DIR"
 echo "[1/6] Building production frontend bundle..."
 npm run build
 
-echo "[2/6] Detecting Python runtime environment and generating application icon..."
+echo "[2/6] Verifying and generating official branding icon assets..."
 if [ -x "$ROOT_DIR/.venv/bin/python" ]; then
   PYTHON_EXEC="$ROOT_DIR/.venv/bin/python"
 elif command -v python3 >/dev/null 2>&1; then
@@ -25,20 +25,8 @@ else
 fi
 echo "Using Python executable: $PYTHON_EXEC"
 
-"$PYTHON_EXEC" - <<'PY' "$BUILD_TMP/vellum-pdf-pro.png"
-import sys
-from PIL import Image, ImageDraw
-
-img = Image.new("RGBA", (256, 256), (15, 23, 42, 255))
-draw = ImageDraw.Draw(img)
-draw.rounded_rectangle([16, 16, 240, 240], radius=36, fill=(30, 58, 138, 255), outline=(96, 165, 250, 255), width=6)
-draw.rounded_rectangle([54, 46, 202, 210], radius=12, fill=(255, 255, 255, 255))
-draw.rectangle([74, 76, 182, 94], fill=(37, 99, 235, 255))
-draw.rectangle([74, 112, 182, 126], fill=(100, 116, 139, 255))
-draw.rectangle([74, 140, 162, 154], fill=(100, 116, 139, 255))
-draw.rectangle([74, 168, 142, 182], fill=(220, 38, 38, 255))
-img.save(sys.argv[1], format="PNG")
-PY
+"$PYTHON_EXEC" "$ROOT_DIR/scripts/generate_branding_assets.py"
+cp "$ROOT_DIR/resources/icons/vellum-256.png" "$BUILD_TMP/vellum-pdf-pro.png"
 
 echo "[3/6] Assembling completely self-contained application payload..."
 APP_STAGE="$BUILD_TMP/payload"
@@ -53,10 +41,11 @@ fi
 cp -r "$ROOT_DIR/node_modules/electron/dist/"* "$APP_STAGE/electron/"
 
 # 2. Vellum Application Code
-echo " -> Bundling application code (dist, electron, backend)..."
+echo " -> Bundling application code (dist, electron, backend, resources)..."
 cp -r "$ROOT_DIR/dist" "$APP_STAGE/app/"
 cp -r "$ROOT_DIR/electron" "$APP_STAGE/app/"
 cp -r "$ROOT_DIR/backend" "$APP_STAGE/app/"
+cp -r "$ROOT_DIR/resources" "$APP_STAGE/app/"
 cp "$ROOT_DIR/package.json" "$APP_STAGE/app/"
 
 # 3. Python 3.11 Runtime & Complete Site-Packages Engine
@@ -135,12 +124,20 @@ mkdir -p "$DEB_ROOT/DEBIAN"
 mkdir -p "$DEB_ROOT/opt/vellum-pdf-pro/payload"
 mkdir -p "$DEB_ROOT/usr/bin"
 mkdir -p "$DEB_ROOT/usr/share/applications"
-mkdir -p "$DEB_ROOT/usr/share/icons/hicolor/256x256/apps"
+mkdir -p "$DEB_ROOT/usr/share/pixmaps"
 
 cp -al "$APP_STAGE/"* "$DEB_ROOT/opt/vellum-pdf-pro/payload/"
 cp "$BUILD_TMP/vellum-launcher.sh" "$DEB_ROOT/usr/bin/vellum-pdf-pro"
 cp "$BUILD_TMP/vellum-pdf-pro.desktop" "$DEB_ROOT/usr/share/applications/vellum-pdf-pro.desktop"
-cp "$BUILD_TMP/vellum-pdf-pro.png" "$DEB_ROOT/usr/share/icons/hicolor/256x256/apps/vellum-pdf-pro.png"
+
+# Install complete multi-resolution hicolor icon suite and pixmaps
+for sz in 16 24 32 48 64 128 256 512; do
+  mkdir -p "$DEB_ROOT/usr/share/icons/hicolor/${sz}x${sz}/apps"
+  cp "$ROOT_DIR/resources/icons/vellum-${sz}.png" "$DEB_ROOT/usr/share/icons/hicolor/${sz}x${sz}/apps/vellum-pdf-pro.png"
+done
+mkdir -p "$DEB_ROOT/usr/share/icons/hicolor/scalable/apps"
+cp "$ROOT_DIR/resources/branding/vellum-app-icon.svg" "$DEB_ROOT/usr/share/icons/hicolor/scalable/apps/vellum-pdf-pro.svg"
+cp "$ROOT_DIR/resources/icons/vellum-256.png" "$DEB_ROOT/usr/share/pixmaps/vellum-pdf-pro.png"
 
 INSTALLED_KB=$(du -sk "$DEB_ROOT/opt" | awk '{print $1}')
 cat > "$DEB_ROOT/DEBIAN/control" <<EOF
@@ -187,7 +184,19 @@ exec "$BASE/electron/electron" --no-sandbox "$BASE/app/electron/main.cjs" "$@"
 EOF
 chmod +x "$APPDIR/AppRun"
 cp "$BUILD_TMP/vellum-pdf-pro.desktop" "$APPDIR/vellum-pdf-pro.desktop"
-cp "$BUILD_TMP/vellum-pdf-pro.png" "$APPDIR/vellum-pdf-pro.png"
+cp "$ROOT_DIR/resources/icons/vellum-512.png" "$APPDIR/vellum-pdf-pro.png"
+cp "$ROOT_DIR/resources/icons/vellum-256.png" "$APPDIR/.DirIcon"
+cp "$ROOT_DIR/resources/branding/vellum-app-icon.svg" "$APPDIR/vellum-pdf-pro.svg"
+
+# AppImage hicolor icons
+for sz in 16 24 32 48 64 128 256 512; do
+  mkdir -p "$APPDIR/usr/share/icons/hicolor/${sz}x${sz}/apps"
+  cp "$ROOT_DIR/resources/icons/vellum-${sz}.png" "$APPDIR/usr/share/icons/hicolor/${sz}x${sz}/apps/vellum-pdf-pro.png"
+done
+mkdir -p "$APPDIR/usr/share/icons/hicolor/scalable/apps"
+cp "$ROOT_DIR/resources/branding/vellum-app-icon.svg" "$APPDIR/usr/share/icons/hicolor/scalable/apps/vellum-pdf-pro.svg"
+mkdir -p "$APPDIR/usr/share/pixmaps"
+cp "$ROOT_DIR/resources/icons/vellum-256.png" "$APPDIR/usr/share/pixmaps/vellum-pdf-pro.png"
 ln -sf usr/lib/vellum-pdf-pro/app/electron "$APPDIR/electron"
 
 RUNTIME_BIN=""

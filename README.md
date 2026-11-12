@@ -1,8 +1,21 @@
-# Vellum PDF Pro
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="resources/branding/vellum-wordmark-dark.svg">
+    <source media="(prefers-color-scheme: light)" srcset="resources/branding/vellum-wordmark-light.svg">
+    <img alt="Vellum PDF Pro" src="resources/branding/vellum-wordmark-dark.svg" width="460">
+  </picture>
+</p>
 
-[![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
-[![Platform: Linux](https://img.shields.io/badge/Platform-Linux%20x86__64-orange.svg)](https://github.com)
-[![Engine: PyMuPDF + pikepdf + pyHanko](https://img.shields.io/badge/Engine-PyMuPDF%20%7C%20pikepdf%20%7C%20pyHanko-green.svg)](https://github.com)
+<p align="center">
+  <strong>Professional Offline Linux Desktop PDF Editor</strong><br>
+  <em>Direct content stream editing, embedded font glyph synthesis, PKCS#12 digital signatures, and neural OCR.</em>
+</p>
+
+<p align="center">
+  <a href="https://www.gnu.org/licenses/agpl-3.0"><img src="https://img.shields.io/badge/License-AGPL_v3-blue.svg" alt="License: AGPL v3"></a>
+  <img src="https://img.shields.io/badge/Platform-Linux%20x86__64-orange.svg" alt="Platform: Linux">
+  <img src="https://img.shields.io/badge/Engine-PyMuPDF%20%7C%20pikepdf%20%7C%20pyHanko-green.svg" alt="Engine: PyMuPDF | pikepdf | pyHanko">
+</p>
 
 **Vellum PDF Pro** is a professional, full-featured Linux desktop PDF editor built to provide an offline, genuine document editing experience comparable in functionality to Adobe Acrobat Pro.
 

@@ -8,6 +8,14 @@ The project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html
 ## [Unreleased]
 
 ### Added
+- **Official Branding Kit v2 Integration**:
+  - Integrated official Vellum PDF Pro Branding Kit v2 throughout the application, Linux system packaging, and documentation.
+  - Deployed the approved lighter cobalt-navy tile icon (`#285C97` → `#19477F` gradient) ensuring high contrast and sharp legibility for the dark-blue geometric "V" emblem across both light and dark desktop themes.
+  - Implemented crisp SVG mark (`VellumMarkIcon`) in the frameless header brand badge, maintaining compact horizontal footprint (18×18 px) alongside application menus.
+  - Enhanced About dialog with official 64×64 icon tile, bold typography, version status, GNU AGPL-3.0 licensing, engine stack specifications, and repository links.
+  - Added deterministic vector rasterization utility (`scripts/generate_branding_assets.py`) generating complete standard icon resolutions: 16×16, 24×24, 32×32, 48×48, 64×64, 128×128, 256×256, 512×512, 1024×1024, multi-size `.ico`, and web favicons.
+  - Configured Linux system integration: FreeDesktop `.desktop` file launcher icon, Ubuntu dock icon, task switcher, `/usr/share/icons/hicolor` hierarchy (16px to 512px + scalable SVG), `/usr/share/pixmaps` legacy fallback, and AppImage `.DirIcon`.
+  - Added theme-responsive GitHub README header banner with automatic dark and light wordmark switching via SVG `<picture>` elements.
 - **Integrated Frameless Linux Desktop Window**:
   - Eliminated the separate OS title bar on Linux desktops (`frame: false`), uniting window controls, document caption, menus, search, command palette, and theme options into a single compact header.
   - Added integrated desktop window controls (Minimize, Maximize / Restore with dynamic icon switching, Close with red hover highlight).
