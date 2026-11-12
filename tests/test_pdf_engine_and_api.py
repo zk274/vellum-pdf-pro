@@ -1011,3 +1011,181 @@ def test_textbox_inline_editing_wrapping_coordinates_and_lifecycle(tmp_path: Pat
     assert not offending_lines, f"Found forbidden blocking browser dialogs: {offending_lines}"
 
 
+def test_object_selection_moving_resizing_and_persistence():
+    """Verify professional object manipulation: select, move, resize, duplicate, delete, and persist."""
+    # 1. Create a fresh document
+    res_new = client.post("/api/docs/new", json={"filename": "object_manipulation_test.pdf", "page_count": 1})
+    assert res_new.status_code == 200
+    doc_id = res_new.json()["doc_id"]
+
+    # 2. Add an interactive Vellum text box
+    add_box_payload = {
+        "text": "Movable & Resizable Text Box",
+        "bbox": [100.0, 150.0, 300.0, 210.0],
+        "font_name": "helv",
+        "font_size": 14.0,
+        "color_hex": "#1d4ed8",
+        "bold": True,
+        "italic": False,
+        "align": "left",
+    }
+    r_add = client.post(f"/api/docs/{doc_id}/pages/0/add-text", json=add_box_payload)
+    assert r_add.status_code == 200
+
+    # 3. Verify object is tracked in vellum_boxes
+    r_objs = client.get(f"/api/docs/{doc_id}/pages/0/objects")
+    assert r_objs.status_code == 200
+    objs_data = r_objs.json()
+    assert "vellum_boxes" in objs_data
+    assert len(objs_data["vellum_boxes"]) == 1
+    vbox = objs_data["vellum_boxes"][0]
+    box_id = vbox["id"]
+    assert vbox["text"] == "Movable & Resizable Text Box"
+    assert vbox["bbox"] == [100.0, 150.0, 300.0, 210.0]
+
+    # 4. Move text box to new coordinates [150.0, 250.0, 350.0, 310.0]
+    new_moved_bbox = [150.0, 250.0, 350.0, 310.0]
+    r_move = client.post(
+        f"/api/docs/{doc_id}/pages/0/transform-object",
+        json={
+            "object_id": box_id,
+            "object_type": "textbox",
+            "action": "move",
+            "orig_bbox": vbox["bbox"],
+            "new_bbox": new_moved_bbox,
+            "text": vbox["text"],
+            "font_name": vbox["font"],
+            "font_size": vbox["size"],
+            "color_hex": vbox["color"],
+        },
+    )
+    assert r_move.status_code == 200
+    updated_objs = r_move.json()["objects"]
+    assert len(updated_objs["vellum_boxes"]) == 1
+    assert updated_objs["vellum_boxes"][0]["bbox"] == new_moved_bbox
+
+    # 5. Resize text box [150.0, 250.0, 450.0, 350.0]
+    new_resized_bbox = [150.0, 250.0, 450.0, 350.0]
+    r_resize = client.post(
+        f"/api/docs/{doc_id}/pages/0/transform-object",
+        json={
+            "object_id": box_id,
+            "object_type": "textbox",
+            "action": "move",
+            "orig_bbox": new_moved_bbox,
+            "new_bbox": new_resized_bbox,
+            "text": "Movable & Resizable Text Box (Resized)",
+            "font_name": "helv",
+            "font_size": 16.0,
+            "color_hex": "#0f766e",
+        },
+    )
+    assert r_resize.status_code == 200
+    resized_objs = r_resize.json()["objects"]
+    assert resized_objs["vellum_boxes"][0]["bbox"] == new_resized_bbox
+    assert "Resized" in resized_objs["vellum_boxes"][0]["text"]
+
+    # 6. Duplicate text box
+    r_dup = client.post(
+        f"/api/docs/{doc_id}/pages/0/transform-object",
+        json={
+            "object_id": box_id,
+            "object_type": "textbox",
+            "action": "duplicate",
+            "orig_bbox": new_resized_bbox,
+        },
+    )
+    assert r_dup.status_code == 200
+    dup_objs = r_dup.json()["objects"]
+    assert len(dup_objs["vellum_boxes"]) == 2
+    # Verify offset by +20pt
+    dup_box = next(b for b in dup_objs["vellum_boxes"] if b["id"] != box_id)
+    assert dup_box["bbox"][0] == new_resized_bbox[0] + 20
+    assert dup_box["bbox"][1] == new_resized_bbox[1] + 20
+
+    # 7. Delete duplicated box
+    r_del = client.post(
+        f"/api/docs/{doc_id}/pages/0/transform-object",
+        json={
+            "object_id": dup_box["id"],
+            "object_type": "textbox",
+            "action": "delete",
+            "orig_bbox": dup_box["bbox"],
+        },
+    )
+    assert r_del.status_code == 200
+    after_del_objs = r_del.json()["objects"]
+    assert len(after_del_objs["vellum_boxes"]) == 1
+
+    # 8. Add a vector shape (Rectangle) and transform it
+    r_shape = client.post(
+        f"/api/docs/{doc_id}/pages/0/add-shape",
+        json={
+            "shape_type": "rect",
+            "bbox": [50.0, 50.0, 200.0, 120.0],
+            "stroke_hex": "#2563eb",
+            "fill_hex": "#dbeafe",
+            "stroke_width": 2.0,
+        },
+    )
+    assert r_shape.status_code == 200
+    shape_objs = client.get(f"/api/docs/{doc_id}/pages/0/objects").json()
+    assert len(shape_objs.get("vellum_shapes", [])) == 1
+    vshape = shape_objs["vellum_shapes"][0]
+    shape_id = vshape["id"]
+
+    # Resize vector shape
+    new_shape_bbox = [60.0, 70.0, 250.0, 160.0]
+    r_shape_trans = client.post(
+        f"/api/docs/{doc_id}/pages/0/transform-object",
+        json={
+            "object_id": shape_id,
+            "object_type": "shape",
+            "action": "move",
+            "orig_bbox": vshape["bbox"],
+            "new_bbox": new_shape_bbox,
+            "stroke_hex": "#7c3aed",
+            "fill_hex": "#ede9fe",
+            "stroke_width": 3.0,
+        },
+    )
+    assert r_shape_trans.status_code == 200
+    updated_shape_objs = r_shape_trans.json()["objects"]
+    assert updated_shape_objs["vellum_shapes"][0]["bbox"] == new_shape_bbox
+
+    # 9. Test Undo and Redo
+    r_undo = client.post(f"/api/docs/{doc_id}/undo")
+    assert r_undo.status_code == 200
+    undo_objs = client.get(f"/api/docs/{doc_id}/pages/0/objects").json()
+    assert undo_objs["vellum_shapes"][0]["bbox"] == vshape["bbox"]
+
+    r_redo = client.post(f"/api/docs/{doc_id}/redo")
+    assert r_redo.status_code == 200
+    redo_objs = client.get(f"/api/docs/{doc_id}/pages/0/objects").json()
+    assert redo_objs["vellum_shapes"][0]["bbox"] == new_shape_bbox
+
+    # 10. Test Persistence across Export and Re-open
+    r_export = client.get(f"/api/docs/{doc_id}/download")
+    assert r_export.status_code == 200
+    exported_bytes = r_export.content
+
+    # Re-open the exported PDF
+    import io
+    r_reopen = client.post(
+        "/api/docs/open-upload",
+        files={"file": ("reopened_vellum.pdf", io.BytesIO(exported_bytes), "application/pdf")},
+    )
+    assert r_reopen.status_code == 200
+    reopened_doc_id = r_reopen.json()["doc_id"]
+    reopened_objs = client.get(f"/api/docs/{reopened_doc_id}/pages/0/objects").json()
+
+    # Confirm vellum_boxes and vellum_shapes were persisted in VellumData and reconstructed
+    assert len(reopened_objs.get("vellum_boxes", [])) == 1
+    assert reopened_objs["vellum_boxes"][0]["bbox"] == new_resized_bbox
+    assert "Resized" in reopened_objs["vellum_boxes"][0]["text"]
+
+    assert len(reopened_objs.get("vellum_shapes", [])) == 1
+    assert reopened_objs["vellum_shapes"][0]["bbox"] == new_shape_bbox
+
+
+

@@ -8,6 +8,20 @@ The project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html
 ## [Unreleased]
 
 ### Added
+- **Professional Object Selection, Moving, Resizing & Manipulation System**:
+  - Implemented single-click object selection for Vellum text boxes, vector shapes, embedded raster images, and native PDF text spans.
+  - Added visible selection outline (`.object-selection-frame`) with eight interactive resize handles (`nw`, `n`, `ne`, `e`, `se`, `s`, `sw`, `w`) and live dimensions badge displaying width × height and origin (X, Y) in PostScript points.
+  - Implemented fluid drag-to-move with live cursor position previews, page boundary clamping, and center-axis alignment snapping with visual dashed guide indicators (`.alignment-guide-line`).
+  - Added eight-direction resize handles with minimum dimension safeguards (15 pt width, 10 pt height).
+  - Added double-click to directly inline-edit text boxes on the canvas, opening the WYSIWYG editor without changing box identity.
+  - Implemented keyboard arrow key nudging (1 pt standard, 10 pt with Shift), `Escape` key gesture cancellation and deselection, and `Delete` / `Backspace` removal.
+  - Added full desktop clipboard operations: Cut (`Ctrl+X`), Copy (`Ctrl+C`), Paste (`Ctrl+V`), and Duplicate (`Ctrl+D` / context menu) with automatic +20 pt offset.
+  - Added floating context menu (Edit Text, Cut, Copy, Paste, Duplicate, Delete, Properties).
+  - Synchronized Properties Inspector with live X, Y, Width, and Height input fields, type-specific typography and shape styling controls, and on-demand commit actions.
+  - Round-trip metadata persistence: stores and retrieves structured object parameters using private `VellumData` dictionary on `page.xref` via PyMuPDF without modifying standard rendering in third-party viewers.
+  - Content stream glyph removal for transformed text boxes and spans using clean mid-x-height glyph redaction bands, leaving no whiteout rectangles, ghost text, or background artifacts.
+  - Vector shape transformation using `PDF_REDACT_LINE_ART_REMOVE_IF_COVERED` clean line art redaction, redrawing shapes (rectangles, ellipses, lines, arrows) at updated positions and dimensions.
+  - Automated undo and redo history tracking across all object moves, resizes, style updates, duplications, and deletions.
 - **Official Branding Kit v2 Integration**:
   - Integrated official Vellum PDF Pro Branding Kit v2 throughout the application, Linux system packaging, and documentation.
   - Deployed the approved lighter cobalt-navy tile icon (`#285C97` → `#19477F` gradient) ensuring high contrast and sharp legibility for the dark-blue geometric "V" emblem across both light and dark desktop themes.

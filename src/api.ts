@@ -210,6 +210,14 @@ export const pdfApi = {
         body: JSON.stringify(payload),
       }
     ),
+  transformObject: (docId: string, pageIndex: number, payload: any) =>
+    requestJson<{ summary: DocumentSummary; objects: PageObjectsData }>(
+      `/api/docs/${docId}/pages/${pageIndex}/transform-object`,
+      {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      }
+    ),
   manageHyperlink: (docId: string, pageIndex: number, payload: any) =>
     requestJson<{ summary: DocumentSummary; objects: PageObjectsData }>(
       `/api/docs/${docId}/pages/${pageIndex}/hyperlink`,

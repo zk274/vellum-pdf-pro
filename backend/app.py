@@ -24,6 +24,7 @@ from .engine.direct_edit import (
     insert_image_object,
     inspect_page_objects,
     manage_hyperlink,
+    transform_object,
 )
 from .engine.forms_signatures import (
     apply_visual_signature,
@@ -180,6 +181,28 @@ class AddShapeRequest(BaseModel):
     fill_hex: Optional[str] = None
     stroke_width: float = 2.0
     opacity: float = 1.0
+
+
+class TransformObjectRequest(BaseModel):
+    object_id: str
+    object_type: str  # "textbox" | "shape" | "image" | "text_span"
+    action: str  # "transform" | "delete" | "duplicate" | "update_style"
+    orig_bbox: List[float]
+    new_bbox: Optional[List[float]] = None
+    text: Optional[str] = None
+    font_name: Optional[str] = None
+    font_size: Optional[float] = None
+    color_hex: Optional[str] = None
+    bold: Optional[bool] = None
+    italic: Optional[bool] = None
+    align: Optional[str] = None
+    shape_type: Optional[str] = None
+    stroke_hex: Optional[str] = None
+    fill_hex: Optional[str] = None
+    stroke_width: Optional[float] = None
+    opacity: Optional[float] = None
+    rotation: Optional[int] = 0
+    image_xref: Optional[int] = None
 
 
 class HyperlinkRequest(BaseModel):
@@ -838,6 +861,44 @@ def api_add_shape(doc_id: str, page_index: int, req: AddShapeRequest) -> Dict[st
         opacity=req.opacity,
     )
     session_manager.update_session(doc_id, new_bytes, action=f"Add Shape ({req.shape_type})")
+    return {
+        "summary": session_manager.get_document_summary(doc_id),
+        "objects": inspect_page_objects(session.pdf_bytes, page_index=page_index),
+    }
+
+
+@app.post("/api/docs/{doc_id}/pages/{page_index}/transform-object")
+def api_transform_object(doc_id: str, page_index: int, req: TransformObjectRequest) -> Dict[str, Any]:
+    session = session_manager.get_session(doc_id)
+    new_bytes = transform_object(
+        pdf_bytes=session.pdf_bytes,
+        page_index=page_index,
+        object_id=req.object_id,
+        object_type=req.object_type,
+        action=req.action,
+        orig_bbox=req.orig_bbox,
+        new_bbox=req.new_bbox,
+        text=req.text,
+        font_name=req.font_name,
+        font_size=req.font_size,
+        color_hex=req.color_hex,
+        bold=req.bold,
+        italic=req.italic,
+        align=req.align,
+        shape_type=req.shape_type,
+        stroke_hex=req.stroke_hex,
+        fill_hex=req.fill_hex,
+        stroke_width=req.stroke_width,
+        opacity=req.opacity,
+        rotation=req.rotation or 0,
+        image_xref=req.image_xref,
+    )
+    action_label = {
+        "delete": f"Delete {req.object_type.title()}",
+        "duplicate": f"Duplicate {req.object_type.title()}",
+        "update_style": f"Format {req.object_type.title()}",
+    }.get(req.action, f"Move/Resize {req.object_type.title()}")
+    session_manager.update_session(doc_id, new_bytes, action=action_label)
     return {
         "summary": session_manager.get_document_summary(doc_id),
         "objects": inspect_page_objects(session.pdf_bytes, page_index=page_index),

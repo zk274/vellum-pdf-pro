@@ -76,6 +76,8 @@ import {
   SignatureVerificationReport,
   TextSpanObject,
   ThumbnailItem,
+  VellumBoxObject,
+  VellumShapeObject,
 } from './types';
 import vellumAppIcon from './assets/branding/vellum-app-icon.png';
 
@@ -113,6 +115,23 @@ interface DraftTextBoxState {
   bold: boolean;
   italic: boolean;
   align: 'left' | 'center' | 'right' | 'justify';
+  editingExistingId?: string;
+}
+
+export interface ActiveTransformState {
+  objectId: string;
+  objectType: 'textbox' | 'shape' | 'image' | 'text_span';
+  data: any;
+  currentBbox: [number, number, number, number];
+  origBbox: [number, number, number, number];
+}
+
+export interface DragGesture {
+  type: 'move' | 'resize';
+  handle?: 'nw' | 'n' | 'ne' | 'e' | 'se' | 's' | 'sw' | 'w';
+  startMousePdf: [number, number];
+  startBbox: [number, number, number, number];
+  currentBbox: [number, number, number, number];
 }
 
 const VellumMarkIcon: React.FC<{ size?: number; className?: string }> = ({ size = 18, className = '' }) => (
@@ -192,6 +211,15 @@ export default function App() {
   const [selectedImage, setSelectedImage] = useState<ImageObject | null>(null);
   const [selectedAnnot, setSelectedAnnot] = useState<AnnotationItem | null>(null);
   const [selectedField, setSelectedField] = useState<FormFieldItem | null>(null);
+
+  // Unified Object Selection, Transformation, and Clipboard state
+  const [selectedObj, setSelectedObj] = useState<ActiveTransformState | null>(null);
+  const [activeGesture, setActiveGesture] = useState<DragGesture | null>(null);
+  const [clipboardObj, setClipboardObj] = useState<ActiveTransformState | null>(null);
+  const [contextMenuPos, setContextMenuPos] = useState<{ x: number; y: number } | null>(null);
+  const [snapGuides, setSnapGuides] = useState<{ x?: number; y?: number }>({});
+  const [editShapeStrokeWidth, setEditShapeStrokeWidth] = useState<number>(2.0);
+  const [editShapeOpacity, setEditShapeOpacity] = useState<number>(1.0);
 
   // Direct Text Span Editor state
   const [editSpanText, setEditSpanText] = useState<string>('');
@@ -949,27 +977,414 @@ export default function App() {
     notify(`Inserted image ${file.name} onto Page ${currentPage + 1}`);
   };
 
+  // Unified Object Selection, Transformation, and Manipulation Handlers
+  const selectManipulableObject = useCallback(
+    (
+      type: 'textbox' | 'shape' | 'image' | 'text_span',
+      id: string,
+      bbox: [number, number, number, number],
+      data: any
+    ) => {
+      setSelectedObj({
+        objectId: id,
+        objectType: type,
+        origBbox: [...bbox] as [number, number, number, number],
+        currentBbox: [...bbox] as [number, number, number, number],
+        data,
+      });
+
+      if (type === 'text_span') {
+        setSelectedSpan(data as TextSpanObject);
+        setEditSpanText(data.text || '');
+        setEditSpanFont(data.font || 'helv');
+        setEditSpanSize(data.size || 12);
+        setEditSpanColor(data.color_hex || '#000000');
+        setEditSpanBold(Boolean(data.bold));
+        setEditSpanItalic(Boolean(data.italic));
+        setEditSpanAlign(data.align || 'left');
+        setEditSpanBbox([...bbox] as [number, number, number, number]);
+      } else {
+        setSelectedSpan(null);
+      }
+
+      if (type === 'image') {
+        setSelectedImage(data as ImageObject);
+        setEditImgBbox([...bbox] as [number, number, number, number]);
+        setEditImgRotation(0);
+        setEditImgCrop([0, 0, 1, 1]);
+      } else {
+        setSelectedImage(null);
+      }
+
+      if (type === 'shape') {
+        setEditShapeStrokeWidth(data.stroke_width || 2.0);
+        setEditShapeOpacity(data.opacity ?? 1.0);
+      }
+
+      setSelectedAnnot(null);
+      setSelectedField(null);
+      setRightOpen(true);
+    },
+    []
+  );
+
+  const commitObjectTransform = useCallback(
+    async (
+      obj: ActiveTransformState,
+      newBbox: [number, number, number, number],
+      action: 'move' | 'delete' | 'duplicate' | 'update_style' = 'move',
+      extraProps: any = {}
+    ) => {
+      if (!activeDoc) return;
+      try {
+        const res = await pdfApi.transformObject(activeDoc.doc_id, currentPage, {
+          object_id: obj.objectId,
+          object_type: obj.objectType,
+          action,
+          orig_bbox: obj.origBbox,
+          new_bbox: newBbox,
+          image_xref: obj.objectType === 'image' ? obj.data?.xref : undefined,
+          ...extraProps,
+        });
+        await refreshDocState(activeDoc.doc_id, currentPage, res.summary);
+        if (action === 'delete') {
+          setSelectedObj(null);
+          notify(`Deleted ${obj.objectType} object from page.`);
+        } else if (action === 'duplicate') {
+          notify(`Duplicated ${obj.objectType} object.`);
+        } else {
+          setSelectedObj({
+            ...obj,
+            origBbox: [...newBbox],
+            currentBbox: [...newBbox],
+            data: { ...obj.data, ...extraProps, bbox: newBbox },
+          });
+          notify(`Updated ${obj.objectType} position and geometry.`);
+        }
+      } catch (err: any) {
+        notify(`Failed to transform ${obj.objectType}: ${err?.message || err}`, 'warn');
+      }
+    },
+    [activeDoc, currentPage, refreshDocState, notify]
+  );
+
+  const handleStartDragMove = (e: React.MouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (!selectedObj) return;
+    setActiveGesture({
+      type: 'move',
+      startMousePdf: [e.clientX, e.clientY],
+      startBbox: [...selectedObj.currentBbox] as [number, number, number, number],
+      currentBbox: [...selectedObj.currentBbox] as [number, number, number, number],
+    });
+  };
+
+  const handleStartResize = (
+    e: React.MouseEvent,
+    handle: 'nw' | 'n' | 'ne' | 'e' | 'se' | 's' | 'sw' | 'w'
+  ) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (!selectedObj) return;
+    setActiveGesture({
+      type: 'resize',
+      handle,
+      startMousePdf: [e.clientX, e.clientY],
+      startBbox: [...selectedObj.currentBbox] as [number, number, number, number],
+      currentBbox: [...selectedObj.currentBbox] as [number, number, number, number],
+    });
+  };
+
+  const handleStartEditText = (box: VellumBoxObject) => {
+    setDraftTextBox({
+      bbox: [...box.bbox],
+      text: box.text,
+      font: box.font_name || 'helv',
+      size: box.font_size || 12,
+      color: box.color_hex || '#000000',
+      bold: Boolean(box.bold),
+      italic: Boolean(box.italic),
+      align: (box.align as any) || 'left',
+      editingExistingId: box.id,
+    });
+    setSelectedObj(null);
+    setTimeout(() => {
+      draftTextAreaRef.current?.focus();
+    }, 50);
+  };
+
+  // Window gesture tracking for live dragging, resizing and snapping
+  useEffect(() => {
+    if (!activeGesture || !selectedObj) return;
+
+    const handleGlobalMouseMove = (e: MouseEvent) => {
+      const dxPdf = (e.clientX - activeGesture.startMousePdf[0]) / zoom;
+      const dyPdf = (e.clientY - activeGesture.startMousePdf[1]) / zoom;
+      const [origX0, origY0, origX1, origY1] = activeGesture.startBbox;
+      const origW = origX1 - origX0;
+      const origH = origY1 - origY0;
+
+      let newX0 = origX0;
+      let newY0 = origY0;
+      let newX1 = origX1;
+      let newY1 = origY1;
+
+      let guideX: number | undefined = undefined;
+      let guideY: number | undefined = undefined;
+
+      if (activeGesture.type === 'move') {
+        newX0 = origX0 + dxPdf;
+        newY0 = origY0 + dyPdf;
+        newX1 = newX0 + origW;
+        newY1 = newY0 + origH;
+
+        if (newX0 < 0) {
+          newX0 = 0;
+          newX1 = origW;
+        }
+        if (newY0 < 0) {
+          newY0 = 0;
+          newY1 = origH;
+        }
+        if (newX1 > pageSizePt.width) {
+          newX1 = pageSizePt.width;
+          newX0 = Math.max(0, pageSizePt.width - origW);
+        }
+        if (newY1 > pageSizePt.height) {
+          newY1 = pageSizePt.height;
+          newY0 = Math.max(0, pageSizePt.height - origH);
+        }
+
+        // Snapping to page center axes (within 5 pt)
+        const centerX = (newX0 + newX1) / 2;
+        const centerY = (newY0 + newY1) / 2;
+        const pageCenterX = pageSizePt.width / 2;
+        const pageCenterY = pageSizePt.height / 2;
+
+        if (Math.abs(centerX - pageCenterX) < 5) {
+          const snapDiff = pageCenterX - centerX;
+          newX0 += snapDiff;
+          newX1 += snapDiff;
+          guideX = pageCenterX;
+        }
+        if (Math.abs(centerY - pageCenterY) < 5) {
+          const snapDiff = pageCenterY - centerY;
+          newY0 += snapDiff;
+          newY1 += snapDiff;
+          guideY = pageCenterY;
+        }
+      } else if (activeGesture.type === 'resize' && activeGesture.handle) {
+        const h = activeGesture.handle;
+        const minW = 15;
+        const minH = 10;
+
+        if (h.includes('w')) {
+          newX0 = Math.min(origX1 - minW, Math.max(0, origX0 + dxPdf));
+        }
+        if (h.includes('e')) {
+          newX1 = Math.max(origX0 + minW, Math.min(pageSizePt.width, origX1 + dxPdf));
+        }
+        if (h.includes('n')) {
+          newY0 = Math.min(origY1 - minH, Math.max(0, origY0 + dyPdf));
+        }
+        if (h.includes('s')) {
+          newY1 = Math.max(origY0 + minH, Math.min(pageSizePt.height, origY1 + dyPdf));
+        }
+      }
+
+      const updatedBbox: [number, number, number, number] = [
+        +(newX0.toFixed(1)),
+        +(newY0.toFixed(1)),
+        +(newX1.toFixed(1)),
+        +(newY1.toFixed(1)),
+      ];
+
+      setSelectedObj((prev) => (prev ? { ...prev, currentBbox: updatedBbox } : null));
+      setSnapGuides({ x: guideX, y: guideY });
+    };
+
+    const handleGlobalMouseUp = async () => {
+      setSnapGuides({});
+      const gesture = activeGesture;
+      setActiveGesture(null);
+
+      if (!selectedObj || !activeDoc) return;
+      const current = selectedObj.currentBbox;
+      const orig = gesture.startBbox;
+      if (
+        Math.abs(current[0] - orig[0]) > 0.5 ||
+        Math.abs(current[1] - orig[1]) > 0.5 ||
+        Math.abs(current[2] - orig[2]) > 0.5 ||
+        Math.abs(current[3] - orig[3]) > 0.5
+      ) {
+        await commitObjectTransform(selectedObj, current);
+      }
+    };
+
+    window.addEventListener('mousemove', handleGlobalMouseMove);
+    window.addEventListener('mouseup', handleGlobalMouseUp);
+    return () => {
+      window.removeEventListener('mousemove', handleGlobalMouseMove);
+      window.removeEventListener('mouseup', handleGlobalMouseUp);
+    };
+  }, [activeGesture, selectedObj, zoom, pageSizePt, activeDoc, commitObjectTransform]);
+
+  // Global Keyboard shortcuts: Escape, Delete, Duplicate, Clipboard, Arrow nudging
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      const targetTag = (e.target as HTMLElement)?.tagName?.toLowerCase();
+      if (targetTag === 'input' || targetTag === 'textarea' || (e.target as HTMLElement)?.isContentEditable) {
+        return;
+      }
+
+      if (e.key === 'Escape') {
+        if (activeGesture) {
+          if (selectedObj) {
+            setSelectedObj({
+              ...selectedObj,
+              currentBbox: [...selectedObj.origBbox],
+            });
+          }
+          setActiveGesture(null);
+          setSnapGuides({});
+          notify('Transformation cancelled.');
+        } else if (selectedObj) {
+          setSelectedObj(null);
+          setContextMenuPos(null);
+        }
+        return;
+      }
+
+      if (!selectedObj || !activeDoc) return;
+
+      if (e.key === 'Delete' || e.key === 'Backspace') {
+        e.preventDefault();
+        commitObjectTransform(selectedObj, selectedObj.currentBbox, 'delete');
+        return;
+      }
+
+      if ((e.ctrlKey || e.metaKey) && (e.key === 'd' || e.key === 'D')) {
+        e.preventDefault();
+        commitObjectTransform(selectedObj, selectedObj.currentBbox, 'duplicate');
+        return;
+      }
+
+      if ((e.ctrlKey || e.metaKey) && (e.key === 'c' || e.key === 'C')) {
+        e.preventDefault();
+        setClipboardObj({ ...selectedObj });
+        notify(`Copied ${selectedObj.objectType} to clipboard.`);
+        return;
+      }
+
+      if ((e.ctrlKey || e.metaKey) && (e.key === 'x' || e.key === 'X')) {
+        e.preventDefault();
+        setClipboardObj({ ...selectedObj });
+        commitObjectTransform(selectedObj, selectedObj.currentBbox, 'delete');
+        notify(`Cut ${selectedObj.objectType} to clipboard.`);
+        return;
+      }
+
+      if ((e.ctrlKey || e.metaKey) && (e.key === 'v' || e.key === 'V')) {
+        e.preventDefault();
+        if (clipboardObj) {
+          commitObjectTransform(clipboardObj, clipboardObj.currentBbox, 'duplicate');
+        }
+        return;
+      }
+
+      // Arrow keys nudging (1 pt standard, 10 pt with Shift)
+      if (['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(e.key)) {
+        e.preventDefault();
+        const step = e.shiftKey ? 10 : 1;
+        let dx = 0;
+        let dy = 0;
+        if (e.key === 'ArrowLeft') dx = -step;
+        if (e.key === 'ArrowRight') dx = step;
+        if (e.key === 'ArrowUp') dy = -step;
+        if (e.key === 'ArrowDown') dy = step;
+
+        const [x0, y0, x1, y1] = selectedObj.currentBbox;
+        const w = x1 - x0;
+        const h = y1 - y0;
+        const nx0 = Math.max(0, Math.min(pageSizePt.width - w, x0 + dx));
+        const ny0 = Math.max(0, Math.min(pageSizePt.height - h, y0 + dy));
+        const newBbox: [number, number, number, number] = [
+          +(nx0.toFixed(1)),
+          +(ny0.toFixed(1)),
+          +((nx0 + w).toFixed(1)),
+          +((ny0 + h).toFixed(1)),
+        ];
+        commitObjectTransform(selectedObj, newBbox, 'move');
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [selectedObj, activeGesture, activeDoc, currentPage, pageSizePt, clipboardObj, commitObjectTransform, notify]);
+
+  // Dismiss context menu on window click
+  useEffect(() => {
+    const handleDismissMenu = () => setContextMenuPos(null);
+    window.addEventListener('click', handleDismissMenu);
+    return () => window.removeEventListener('click', handleDismissMenu);
+  }, []);
+
   const handleCommitDraftTextBox = async () => {
     if (!activeDoc || !draftTextBox) return;
     const trimmed = draftTextBox.text.trim();
     if (!trimmed) {
+      if (draftTextBox.editingExistingId) {
+        try {
+          const res = await pdfApi.transformObject(activeDoc.doc_id, currentPage, {
+            object_id: draftTextBox.editingExistingId,
+            object_type: 'textbox',
+            action: 'delete',
+            orig_bbox: draftTextBox.bbox,
+          });
+          await refreshDocState(activeDoc.doc_id, currentPage, res.summary);
+          notify('Removed empty text box.');
+        } catch (err: any) {
+          notify(`Failed to remove empty text box: ${err?.message || err}`, 'warn');
+        }
+      }
       setDraftTextBox(null);
       return;
     }
     try {
-      const res = await pdfApi.addTextObject(activeDoc.doc_id, currentPage, {
-        text: draftTextBox.text,
-        bbox: draftTextBox.bbox,
-        font_name: draftTextBox.font,
-        font_size: draftTextBox.size,
-        color_hex: draftTextBox.color,
-        bold: draftTextBox.bold,
-        italic: draftTextBox.italic,
-        align: draftTextBox.align,
-      });
-      setDraftTextBox(null);
-      await refreshDocState(activeDoc.doc_id, currentPage, res.summary);
-      notify('Inserted text box into PDF content stream.');
+      if (draftTextBox.editingExistingId) {
+        const res = await pdfApi.transformObject(activeDoc.doc_id, currentPage, {
+          object_id: draftTextBox.editingExistingId,
+          object_type: 'textbox',
+          action: 'move',
+          orig_bbox: draftTextBox.bbox,
+          new_bbox: draftTextBox.bbox,
+          text: draftTextBox.text,
+          font_name: draftTextBox.font,
+          font_size: draftTextBox.size,
+          color_hex: draftTextBox.color,
+          bold: draftTextBox.bold,
+          italic: draftTextBox.italic,
+          align: draftTextBox.align,
+        });
+        setDraftTextBox(null);
+        await refreshDocState(activeDoc.doc_id, currentPage, res.summary);
+        notify('Updated text box in PDF content stream.');
+      } else {
+        const res = await pdfApi.addTextObject(activeDoc.doc_id, currentPage, {
+          text: draftTextBox.text,
+          bbox: draftTextBox.bbox,
+          font_name: draftTextBox.font,
+          font_size: draftTextBox.size,
+          color_hex: draftTextBox.color,
+          bold: draftTextBox.bold,
+          italic: draftTextBox.italic,
+          align: draftTextBox.align,
+        });
+        setDraftTextBox(null);
+        await refreshDocState(activeDoc.doc_id, currentPage, res.summary);
+        notify('Inserted text box into PDF content stream.');
+      }
     } catch (err: any) {
       notify(`Failed to insert text box: ${err?.message || err}`, 'warn');
     }
@@ -1010,7 +1425,16 @@ export default function App() {
   };
 
   const handleCanvasMouseDown = (e: React.MouseEvent<HTMLDivElement>) => {
-    if (!activeDoc || subTool === 'select') return;
+    if (!activeDoc) return;
+    if (subTool === 'select') {
+      setSelectedObj(null);
+      setSelectedSpan(null);
+      setSelectedImage(null);
+      setSelectedAnnot(null);
+      setSelectedField(null);
+      setContextMenuPos(null);
+      return;
+    }
     const [px, py] = toPdfCoords(e.clientX, e.clientY, e.currentTarget);
     setDragStart({ x: px, y: py });
     setDragCurrent({ x: px, y: py });
@@ -2662,13 +3086,71 @@ export default function App() {
                   />
                 ))}
 
+                {/* Vellum Text Boxes (Interactive Move/Resize/Edit) */}
+                {mode === 'edit' &&
+                  subTool === 'select' &&
+                  pageObjects?.vellum_boxes?.map((box) => (
+                    <div
+                      key={box.id}
+                      className={`vellum-box-overlay ${selectedObj?.objectId === box.id ? 'active-selected' : ''}`}
+                      style={{
+                        left: `${box.bbox[0] * zoom}px`,
+                        top: `${box.bbox[1] * zoom}px`,
+                        width: `${Math.max(12, (box.bbox[2] - box.bbox[0]) * zoom)}px`,
+                        height: `${Math.max(10, (box.bbox[3] - box.bbox[1]) * zoom)}px`,
+                      }}
+                      title={`Text Box: "${box.text}" (Click to select/drag, Double-click to edit)`}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        selectManipulableObject('textbox', box.id, box.bbox, box);
+                      }}
+                      onDoubleClick={(e) => {
+                        e.stopPropagation();
+                        handleStartEditText(box);
+                      }}
+                      onContextMenu={(e) => {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        selectManipulableObject('textbox', box.id, box.bbox, box);
+                        setContextMenuPos({ x: e.clientX, y: e.clientY });
+                      }}
+                    />
+                  ))}
+
+                {/* Vellum Vector Shapes (Interactive Move/Resize) */}
+                {mode === 'edit' &&
+                  subTool === 'select' &&
+                  pageObjects?.vellum_shapes?.map((shape) => (
+                    <div
+                      key={shape.id}
+                      className={`vellum-shape-overlay ${selectedObj?.objectId === shape.id ? 'active-selected' : ''}`}
+                      style={{
+                        left: `${Math.min(shape.bbox[0], shape.bbox[2]) * zoom}px`,
+                        top: `${Math.min(shape.bbox[1], shape.bbox[3]) * zoom}px`,
+                        width: `${Math.max(12, Math.abs(shape.bbox[2] - shape.bbox[0]) * zoom)}px`,
+                        height: `${Math.max(10, Math.abs(shape.bbox[3] - shape.bbox[1]) * zoom)}px`,
+                      }}
+                      title={`Vector Shape: ${shape.shape_type} (Click to select/drag/resize)`}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        selectManipulableObject('shape', shape.id, shape.bbox, shape);
+                      }}
+                      onContextMenu={(e) => {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        selectManipulableObject('shape', shape.id, shape.bbox, shape);
+                        setContextMenuPos({ x: e.clientX, y: e.clientY });
+                      }}
+                    />
+                  ))}
+
                 {/* Direct PDF Text Spans & Images Overlay (Active in Edit Mode) */}
                 {mode === 'edit' &&
                   subTool === 'select' &&
                   pageObjects?.text_spans.map((sp) => (
                     <div
                       key={sp.id}
-                      className={`span-box ${selectedSpan?.id === sp.id ? 'selected' : ''}`}
+                      className={`span-box ${selectedObj?.objectId === sp.id ? 'selected' : ''}`}
                       style={{
                         left: `${sp.bbox[0] * zoom}px`,
                         top: `${sp.bbox[1] * zoom}px`,
@@ -2678,10 +3160,13 @@ export default function App() {
                       title={`Click to edit PDF text span: "${sp.text}" (${sp.font}, ${sp.size}pt)`}
                       onClick={(e) => {
                         e.stopPropagation();
-                        setSelectedSpan(sp);
-                        setSelectedImage(null);
-                        setSelectedAnnot(null);
-                        setSelectedField(null);
+                        selectManipulableObject('text_span', sp.id, sp.bbox, sp);
+                      }}
+                      onContextMenu={(e) => {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        selectManipulableObject('text_span', sp.id, sp.bbox, sp);
+                        setContextMenuPos({ x: e.clientX, y: e.clientY });
                       }}
                     />
                   ))}
@@ -2691,7 +3176,7 @@ export default function App() {
                   pageObjects?.images.map((im) => (
                     <div
                       key={im.id}
-                      className={`image-box ${selectedImage?.id === im.id ? 'selected' : ''}`}
+                      className={`image-box ${selectedObj?.objectId === im.id ? 'selected' : ''}`}
                       style={{
                         left: `${im.bbox[0] * zoom}px`,
                         top: `${im.bbox[1] * zoom}px`,
@@ -2701,9 +3186,13 @@ export default function App() {
                       title={`Click to transform/replace/delete embedded PDF image (xref=${im.xref}, ${im.width}×${im.height}px)`}
                       onClick={(e) => {
                         e.stopPropagation();
-                        setSelectedImage(im);
-                        setSelectedSpan(null);
-                        setSelectedAnnot(null);
+                        selectManipulableObject('image', im.id, im.bbox, im);
+                      }}
+                      onContextMenu={(e) => {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        selectManipulableObject('image', im.id, im.bbox, im);
+                        setContextMenuPos({ x: e.clientX, y: e.clientY });
                       }}
                     />
                   ))}
@@ -2879,6 +3368,68 @@ export default function App() {
                     />
                   </div>
                 )}
+
+                {/* Unified Object Selection Frame with 8 Resize Handles */}
+                {mode === 'edit' && subTool === 'select' && selectedObj && !draftTextBox && (
+                  <div
+                    className="object-selection-frame"
+                    style={{
+                      left: `${selectedObj.currentBbox[0] * zoom}px`,
+                      top: `${selectedObj.currentBbox[1] * zoom}px`,
+                      width: `${Math.max(10, (selectedObj.currentBbox[2] - selectedObj.currentBbox[0]) * zoom)}px`,
+                      height: `${Math.max(10, (selectedObj.currentBbox[3] - selectedObj.currentBbox[1]) * zoom)}px`,
+                    }}
+                    onClick={(e) => e.stopPropagation()}
+                    onContextMenu={(e) => {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      setContextMenuPos({ x: e.clientX, y: e.clientY });
+                    }}
+                  >
+                    <div
+                      className="object-selection-body"
+                      onMouseDown={handleStartDragMove}
+                      onDoubleClick={(e) => {
+                        if (selectedObj.objectType === 'textbox') {
+                          e.stopPropagation();
+                          handleStartEditText(selectedObj.data);
+                        }
+                      }}
+                      title="Drag to move object · Arrow keys to nudge (Shift: 10pt) · Del to remove"
+                    />
+                    <div className="selection-dimension-badge">
+                      <span>
+                        {Math.round(selectedObj.currentBbox[2] - selectedObj.currentBbox[0])} ×{' '}
+                        {Math.round(selectedObj.currentBbox[3] - selectedObj.currentBbox[1])} pt
+                      </span>
+                      <span>
+                        (X: {Math.round(selectedObj.currentBbox[0])}, Y: {Math.round(selectedObj.currentBbox[1])})
+                      </span>
+                    </div>
+                    <div className="resize-handle handle-nw" onMouseDown={(e) => handleStartResize(e, 'nw')} />
+                    <div className="resize-handle handle-n" onMouseDown={(e) => handleStartResize(e, 'n')} />
+                    <div className="resize-handle handle-ne" onMouseDown={(e) => handleStartResize(e, 'ne')} />
+                    <div className="resize-handle handle-e" onMouseDown={(e) => handleStartResize(e, 'e')} />
+                    <div className="resize-handle handle-se" onMouseDown={(e) => handleStartResize(e, 'se')} />
+                    <div className="resize-handle handle-s" onMouseDown={(e) => handleStartResize(e, 's')} />
+                    <div className="resize-handle handle-sw" onMouseDown={(e) => handleStartResize(e, 'sw')} />
+                    <div className="resize-handle handle-w" onMouseDown={(e) => handleStartResize(e, 'w')} />
+                  </div>
+                )}
+
+                {/* Alignment Guides for Live Snapping */}
+                {snapGuides.x !== undefined && (
+                  <div
+                    className="alignment-guide-line guide-x"
+                    style={{ left: `${snapGuides.x * zoom}px` }}
+                  />
+                )}
+                {snapGuides.y !== undefined && (
+                  <div
+                    className="alignment-guide-line guide-y"
+                    style={{ top: `${snapGuides.y * zoom}px` }}
+                  />
+                )}
               </div>
             </div>
           ) : (
@@ -2895,6 +3446,94 @@ export default function App() {
                   <FolderOpen size={14} /> Open PDF File...
                 </button>
               </div>
+            </div>
+          )}
+
+          {/* Floating Context Menu for Manipulable Objects */}
+          {contextMenuPos && selectedObj && (
+            <div
+              className="object-context-menu"
+              style={{ left: contextMenuPos.x, top: contextMenuPos.y }}
+              onClick={(e) => e.stopPropagation()}
+            >
+              {selectedObj.objectType === 'textbox' && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    handleStartEditText(selectedObj.data);
+                    setContextMenuPos(null);
+                  }}
+                >
+                  <span>Edit Text</span>
+                  <span className="kbd">Double-Click</span>
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={() => {
+                  setClipboardObj({ ...selectedObj });
+                  commitObjectTransform(selectedObj, selectedObj.currentBbox, 'delete');
+                  setContextMenuPos(null);
+                  notify(`Cut ${selectedObj.objectType} to clipboard.`);
+                }}
+              >
+                <span>Cut</span>
+                <span className="kbd">Ctrl+X</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setClipboardObj({ ...selectedObj });
+                  setContextMenuPos(null);
+                  notify(`Copied ${selectedObj.objectType} to clipboard.`);
+                }}
+              >
+                <span>Copy</span>
+                <span className="kbd">Ctrl+C</span>
+              </button>
+              {clipboardObj && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    commitObjectTransform(clipboardObj, clipboardObj.currentBbox, 'duplicate');
+                    setContextMenuPos(null);
+                  }}
+                >
+                  <span>Paste</span>
+                  <span className="kbd">Ctrl+V</span>
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={() => {
+                  commitObjectTransform(selectedObj, selectedObj.currentBbox, 'duplicate');
+                  setContextMenuPos(null);
+                }}
+              >
+                <span>Duplicate</span>
+                <span className="kbd">Ctrl+D</span>
+              </button>
+              <div className="menu-divider" />
+              <button
+                type="button"
+                onClick={() => {
+                  commitObjectTransform(selectedObj, selectedObj.currentBbox, 'delete');
+                  setContextMenuPos(null);
+                }}
+              >
+                <span>Delete</span>
+                <span className="kbd">Del</span>
+              </button>
+              <div className="menu-divider" />
+              <button
+                type="button"
+                onClick={() => {
+                  setRightOpen(true);
+                  setContextMenuPos(null);
+                }}
+              >
+                <span>Properties...</span>
+              </button>
             </div>
           )}
         </main>
@@ -3080,6 +3719,283 @@ export default function App() {
                       title="Cancel and discard text box"
                     >
                       <X size={14} /> Cancel
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {/* UNIFIED OBJECT SELECTION & TRANSFORM INSPECTOR */}
+              {selectedObj && !draftTextBox && (
+                <div className="inspector-section">
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
+                    <h4 style={{ margin: 0 }}>
+                      <Move size={14} />{' '}
+                      {selectedObj.objectType === 'textbox'
+                        ? 'Selected Text Box'
+                        : selectedObj.objectType === 'shape'
+                        ? `Vector Shape (${selectedObj.data?.shape_type || 'shape'})`
+                        : selectedObj.objectType === 'image'
+                        ? 'Embedded Image'
+                        : 'Text Span'}
+                    </h4>
+                    <span className="badge pass">{selectedObj.objectType.toUpperCase()}</span>
+                  </div>
+
+                  <div style={{ marginBottom: 10, fontSize: 11.5, color: 'var(--text-secondary)' }}>
+                    Coordinates in PostScript points. Drag on canvas or edit fields below.
+                  </div>
+
+                  {/* Geometry Inputs (X, Y, Width, Height) */}
+                  <div className="form-row">
+                    <div className="form-group">
+                      <label>X0 (pt)</label>
+                      <input
+                        type="number"
+                        value={Math.round(selectedObj.currentBbox[0])}
+                        onChange={(e) => {
+                          const nx = Number(e.target.value);
+                          const w = selectedObj.currentBbox[2] - selectedObj.currentBbox[0];
+                          const nb: [number, number, number, number] = [
+                            nx,
+                            selectedObj.currentBbox[1],
+                            +(nx + w).toFixed(1),
+                            selectedObj.currentBbox[3],
+                          ];
+                          setSelectedObj({ ...selectedObj, currentBbox: nb });
+                        }}
+                        onBlur={() => commitObjectTransform(selectedObj, selectedObj.currentBbox, 'move')}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') {
+                            commitObjectTransform(selectedObj, selectedObj.currentBbox, 'move');
+                          }
+                        }}
+                      />
+                    </div>
+                    <div className="form-group">
+                      <label>Y0 (pt)</label>
+                      <input
+                        type="number"
+                        value={Math.round(selectedObj.currentBbox[1])}
+                        onChange={(e) => {
+                          const ny = Number(e.target.value);
+                          const h = selectedObj.currentBbox[3] - selectedObj.currentBbox[1];
+                          const nb: [number, number, number, number] = [
+                            selectedObj.currentBbox[0],
+                            ny,
+                            selectedObj.currentBbox[2],
+                            +(ny + h).toFixed(1),
+                          ];
+                          setSelectedObj({ ...selectedObj, currentBbox: nb });
+                        }}
+                        onBlur={() => commitObjectTransform(selectedObj, selectedObj.currentBbox, 'move')}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') {
+                            commitObjectTransform(selectedObj, selectedObj.currentBbox, 'move');
+                          }
+                        }}
+                      />
+                    </div>
+                  </div>
+
+                  <div className="form-row">
+                    <div className="form-group">
+                      <label>Width (pt)</label>
+                      <input
+                        type="number"
+                        min="15"
+                        value={Math.round(selectedObj.currentBbox[2] - selectedObj.currentBbox[0])}
+                        onChange={(e) => {
+                          const nw = Math.max(15, Number(e.target.value));
+                          const nb: [number, number, number, number] = [
+                            selectedObj.currentBbox[0],
+                            selectedObj.currentBbox[1],
+                            +(selectedObj.currentBbox[0] + nw).toFixed(1),
+                            selectedObj.currentBbox[3],
+                          ];
+                          setSelectedObj({ ...selectedObj, currentBbox: nb });
+                        }}
+                        onBlur={() => commitObjectTransform(selectedObj, selectedObj.currentBbox, 'move')}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') {
+                            commitObjectTransform(selectedObj, selectedObj.currentBbox, 'move');
+                          }
+                        }}
+                      />
+                    </div>
+                    <div className="form-group">
+                      <label>Height (pt)</label>
+                      <input
+                        type="number"
+                        min="10"
+                        value={Math.round(selectedObj.currentBbox[3] - selectedObj.currentBbox[1])}
+                        onChange={(e) => {
+                          const nh = Math.max(10, Number(e.target.value));
+                          const nb: [number, number, number, number] = [
+                            selectedObj.currentBbox[0],
+                            selectedObj.currentBbox[1],
+                            selectedObj.currentBbox[2],
+                            +(selectedObj.currentBbox[1] + nh).toFixed(1),
+                          ];
+                          setSelectedObj({ ...selectedObj, currentBbox: nb });
+                        }}
+                        onBlur={() => commitObjectTransform(selectedObj, selectedObj.currentBbox, 'move')}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') {
+                            commitObjectTransform(selectedObj, selectedObj.currentBbox, 'move');
+                          }
+                        }}
+                      />
+                    </div>
+                  </div>
+
+                  {/* Object Type Specific Controls */}
+                  {selectedObj.objectType === 'textbox' && (
+                    <>
+                      <div style={{ marginTop: 8, marginBottom: 8 }}>
+                        <button
+                          type="button"
+                          className="tool-btn primary"
+                          style={{ width: '100%' }}
+                          onClick={() => handleStartEditText(selectedObj.data)}
+                        >
+                          <Type size={13} /> Edit Text Directly On Page (Double-Click)
+                        </button>
+                      </div>
+                      <div className="form-row">
+                        <div className="form-group">
+                          <label>Font</label>
+                          <select
+                            value={selectedObj.data?.font || 'helv'}
+                            onChange={(e) => {
+                              const f = e.target.value;
+                              commitObjectTransform(selectedObj, selectedObj.currentBbox, 'move', { font_name: f });
+                            }}
+                          >
+                            <option value="helv">Helvetica</option>
+                            <option value="tiro">Times Roman</option>
+                            <option value="cour">Courier</option>
+                            <option value="dejavu">DejaVu Sans</option>
+                          </select>
+                        </div>
+                        <div className="form-group">
+                          <label>Font Size</label>
+                          <input
+                            type="number"
+                            step="0.5"
+                            value={selectedObj.data?.size || 12}
+                            onChange={(e) => {
+                              const s = Number(e.target.value);
+                              commitObjectTransform(selectedObj, selectedObj.currentBbox, 'move', { font_size: s });
+                            }}
+                          />
+                        </div>
+                      </div>
+                      <div className="form-row">
+                        <div className="form-group">
+                          <label>Color</label>
+                          <input
+                            type="color"
+                            value={selectedObj.data?.color || '#000000'}
+                            onChange={(e) => {
+                              const c = e.target.value;
+                              commitObjectTransform(selectedObj, selectedObj.currentBbox, 'move', { color_hex: c });
+                            }}
+                            style={{ height: 30, width: '100%' }}
+                          />
+                        </div>
+                        <div className="form-group">
+                          <label>Alignment</label>
+                          <select
+                            value={selectedObj.data?.align || 'left'}
+                            onChange={(e) => {
+                              const a = e.target.value;
+                              commitObjectTransform(selectedObj, selectedObj.currentBbox, 'move', { align: a });
+                            }}
+                          >
+                            <option value="left">Left</option>
+                            <option value="center">Center</option>
+                            <option value="right">Right</option>
+                            <option value="justify">Justify</option>
+                          </select>
+                        </div>
+                      </div>
+                    </>
+                  )}
+
+                  {selectedObj.objectType === 'shape' && (
+                    <>
+                      <div className="form-row">
+                        <div className="form-group">
+                          <label>Stroke Color</label>
+                          <input
+                            type="color"
+                            value={selectedObj.data?.stroke_hex || '#1d4ed8'}
+                            onChange={(e) => {
+                              const sc = e.target.value;
+                              commitObjectTransform(selectedObj, selectedObj.currentBbox, 'move', { stroke_hex: sc });
+                            }}
+                            style={{ height: 30, width: '100%' }}
+                          />
+                        </div>
+                        <div className="form-group">
+                          <label>Fill Color</label>
+                          <input
+                            type="color"
+                            value={selectedObj.data?.fill_hex || '#ffffff'}
+                            onChange={(e) => {
+                              const fc = e.target.value;
+                              commitObjectTransform(selectedObj, selectedObj.currentBbox, 'move', { fill_hex: fc });
+                            }}
+                            style={{ height: 30, width: '100%' }}
+                          />
+                        </div>
+                      </div>
+                      <div className="form-row">
+                        <div className="form-group">
+                          <label>Stroke Width (pt)</label>
+                          <input
+                            type="number"
+                            step="0.5"
+                            min="0.5"
+                            max="36"
+                            value={editShapeStrokeWidth}
+                            onChange={(e) => {
+                              const sw = Number(e.target.value);
+                              setEditShapeStrokeWidth(sw);
+                              commitObjectTransform(selectedObj, selectedObj.currentBbox, 'move', { stroke_width: sw });
+                            }}
+                          />
+                        </div>
+                      </div>
+                    </>
+                  )}
+
+                  {/* Actions Row */}
+                  <div style={{ display: 'flex', gap: 6, marginTop: 12 }}>
+                    <button
+                      type="button"
+                      className="tool-btn"
+                      style={{ flex: 1 }}
+                      onClick={() => commitObjectTransform(selectedObj, selectedObj.currentBbox, 'duplicate')}
+                      title="Duplicate Object (Ctrl+D)"
+                    >
+                      <Copy size={13} /> Duplicate
+                    </button>
+                    <button
+                      type="button"
+                      className="tool-btn danger"
+                      onClick={() => commitObjectTransform(selectedObj, selectedObj.currentBbox, 'delete')}
+                      title="Delete Object (Del)"
+                    >
+                      <Trash2 size={13} /> Delete
+                    </button>
+                    <button
+                      type="button"
+                      className="tool-btn"
+                      onClick={() => setSelectedObj(null)}
+                      title="Deselect (Esc)"
+                    >
+                      <X size={13} />
                     </button>
                   </div>
                 </div>

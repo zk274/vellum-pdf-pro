@@ -89,15 +89,75 @@ export interface LinkObject {
   bbox: [number, number, number, number];
 }
 
+export interface VellumBoxObject {
+  id: string;
+  type: 'textbox';
+  text: string;
+  bbox: [number, number, number, number];
+  font: string;
+  size: number;
+  color: string;
+  bold: boolean;
+  italic: boolean;
+  align: 'left' | 'center' | 'right' | 'justify';
+  background_hex?: string | null;
+  border_hex?: string | null;
+  border_width?: number;
+}
+
+export interface VellumShapeObject {
+  id: string;
+  type: 'shape';
+  shape_type: 'rect' | 'ellipse' | 'line' | 'arrow';
+  bbox: [number, number, number, number];
+  stroke_hex: string;
+  fill_hex?: string | null;
+  stroke_width: number;
+  opacity: number;
+  rotation?: number;
+}
+
+export interface TransformObjectRequest {
+  object_id: string;
+  object_type: 'textbox' | 'shape' | 'image' | 'text_span';
+  action: 'transform' | 'delete' | 'duplicate' | 'update_style';
+  orig_bbox: [number, number, number, number];
+  new_bbox?: [number, number, number, number] | null;
+  text?: string;
+  font_name?: string;
+  font_size?: number;
+  color_hex?: string;
+  bold?: boolean;
+  italic?: boolean;
+  align?: string;
+  shape_type?: string;
+  stroke_hex?: string;
+  fill_hex?: string | null;
+  stroke_width?: number;
+  opacity?: number;
+  rotation?: number;
+  image_xref?: number;
+}
+
+export interface SelectedManipulableObject {
+  id: string;
+  type: 'textbox' | 'shape' | 'image' | 'text_span';
+  bbox: [number, number, number, number];
+  data: VellumBoxObject | VellumShapeObject | ImageObject | TextSpanObject;
+}
+
 export interface PageObjectsData {
   page_index: number;
   width: number;
   height: number;
   rotation: number;
   text_spans: TextSpanObject[];
+  text_blocks?: Array<{ id: string; block_index: number; bbox: [number, number, number, number]; text: string; span_ids: string[] }>;
   images: ImageObject[];
   links: LinkObject[];
   vector_drawings_count: number;
+  vellum_boxes?: VellumBoxObject[];
+  vellum_shapes?: VellumShapeObject[];
 }
 
 export interface AnnotationItem {

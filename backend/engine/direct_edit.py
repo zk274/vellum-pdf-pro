@@ -25,8 +25,11 @@ from __future__ import annotations
 
 import base64
 import io
+import json
 import math
+import random
 import re
+import time
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 import pymupdf
@@ -144,8 +147,31 @@ def _match_font_in_catalog(catalog: List[Dict[str, Any]], span_font: str) -> Opt
 
 
 # ---------------------------------------------------------------------------
-# Inspection
+# Inspection & Vellum Object Metadata Persistence
 # ---------------------------------------------------------------------------
+
+
+def _get_page_vellum_data(doc: pymupdf.Document, page: pymupdf.Page) -> Dict[str, Any]:
+    """Retrieve application-managed private object records from page dictionary."""
+    try:
+        kind, raw = doc.xref_get_key(page.xref, "VellumData")
+        if kind == "string" and raw:
+            clean = raw
+            if clean.startswith("(") and clean.endswith(")"):
+                clean = clean[1:-1]
+            return json.loads(clean)
+    except Exception:
+        pass
+    return {"boxes": [], "shapes": []}
+
+
+def _set_page_vellum_data(doc: pymupdf.Document, page: pymupdf.Page, data: Dict[str, Any]) -> None:
+    """Store application-managed private object records into page dictionary."""
+    try:
+        serialized = json.dumps(data)
+        doc.xref_set_key(page.xref, "VellumData", pymupdf.get_pdf_str(serialized))
+    except Exception:
+        pass
 
 
 def inspect_page_objects(pdf_bytes: bytes, page_index: int = 0) -> Dict[str, Any]:
@@ -265,6 +291,8 @@ def inspect_page_objects(pdf_bytes: bytes, page_index: int = 0) -> Dict[str, Any
                 }
             )
 
+        v_data = _get_page_vellum_data(doc, page)
+
         return {
             "page_index": page_index,
             "width": round(page.rect.width, 2),
@@ -275,6 +303,8 @@ def inspect_page_objects(pdf_bytes: bytes, page_index: int = 0) -> Dict[str, Any
             "images": images,
             "links": links,
             "vector_drawings_count": len(page.get_drawings()),
+            "vellum_boxes": v_data.get("boxes", []),
+            "vellum_shapes": v_data.get("shapes", []),
         }
     finally:
         doc.close()
@@ -741,6 +771,7 @@ def add_text_object(
     background_hex: Optional[str] = None,
     border_hex: Optional[str] = None,
     border_width: float = 0.0,
+    object_id: Optional[str] = None,
 ) -> bytes:
     """Insert a new upright text block (display-space bbox) into the page content stream."""
     doc = pymupdf.open(stream=pdf_bytes, filetype="pdf")
@@ -785,6 +816,8 @@ def add_text_object(
             rotate=page.rotation,
         )
 
+        final_bbox = [round(float(v), 2) for v in bbox]
+
         # If text overflowed the designated box height, expand downward to accommodate full wrapped text
         if rc < 0:
             overflow_h = max(abs(rc), font_size * 2.0)
@@ -806,6 +839,32 @@ def add_text_object(
                 align=align_code,
                 rotate=page.rotation,
             )
+            final_bbox = [round(float(d_expanded.x0), 2), round(float(d_expanded.y0), 2), round(float(d_expanded.x1), 2), round(float(d_expanded.y1), 2)]
+
+        # Persist Vellum Text Box metadata into page dictionary
+        v_data = _get_page_vellum_data(doc, page)
+        box_id = object_id or f"vbox_{int(time.time() * 1000)}_{random.randint(100, 999)}"
+        box_record = {
+            "id": box_id,
+            "type": "textbox",
+            "text": text,
+            "bbox": final_bbox,
+            "font": font_name,
+            "size": round(float(font_size), 2),
+            "color": color_hex,
+            "bold": bold,
+            "italic": italic,
+            "align": align,
+            "background_hex": background_hex,
+            "border_hex": border_hex,
+            "border_width": border_width,
+        }
+        existing_idx = next((i for i, b in enumerate(v_data.get("boxes", [])) if b.get("id") == box_id), None)
+        if existing_idx is not None:
+            v_data["boxes"][existing_idx] = box_record
+        else:
+            v_data.setdefault("boxes", []).append(box_record)
+        _set_page_vellum_data(doc, page, v_data)
 
         return doc.tobytes(garbage=1, deflate=True)
     finally:
@@ -932,6 +991,7 @@ def add_shape_object(
     fill_hex: Optional[str] = None,
     stroke_width: float = 2.0,
     opacity: float = 1.0,
+    object_id: Optional[str] = None,
 ) -> bytes:
     """Draw rect / ellipse / line / arrow into the content stream.
 
@@ -970,6 +1030,28 @@ def add_shape_object(
             fill_opacity=float(opacity),
         )
         shape.commit()
+
+        # Persist Vellum Shape metadata
+        v_data = _get_page_vellum_data(doc, page)
+        shape_id = object_id or f"vshape_{int(time.time() * 1000)}_{random.randint(100, 999)}"
+        shape_record = {
+            "id": shape_id,
+            "type": "shape",
+            "shape_type": shape_type,
+            "bbox": [round(float(v), 2) for v in bbox],
+            "stroke_hex": stroke_hex,
+            "fill_hex": fill_hex,
+            "stroke_width": round(float(stroke_width), 2),
+            "opacity": round(float(opacity), 2),
+            "rotation": 0,
+        }
+        existing_idx = next((i for i, s in enumerate(v_data.get("shapes", [])) if s.get("id") == shape_id), None)
+        if existing_idx is not None:
+            v_data["shapes"][existing_idx] = shape_record
+        else:
+            v_data.setdefault("shapes", []).append(shape_record)
+        _set_page_vellum_data(doc, page, v_data)
+
         return doc.tobytes(garbage=1, deflate=True)
     finally:
         doc.close()
@@ -1002,3 +1084,291 @@ def manage_hyperlink(
         return doc.tobytes(garbage=1, deflate=True)
     finally:
         doc.close()
+
+
+def transform_object(
+    pdf_bytes: bytes,
+    page_index: int,
+    object_id: str,
+    object_type: str,
+    action: str,  # "transform" | "delete" | "duplicate" | "update_style"
+    orig_bbox: List[float],
+    new_bbox: Optional[List[float]] = None,
+    text: Optional[str] = None,
+    font_name: Optional[str] = None,
+    font_size: Optional[float] = None,
+    color_hex: Optional[str] = None,
+    bold: Optional[bool] = None,
+    italic: Optional[bool] = None,
+    align: Optional[str] = None,
+    shape_type: Optional[str] = None,
+    stroke_hex: Optional[str] = None,
+    fill_hex: Optional[str] = None,
+    stroke_width: Optional[float] = None,
+    opacity: Optional[float] = None,
+    rotation: Optional[int] = 0,
+    image_xref: Optional[int] = None,
+) -> bytes:
+    """Unified transformation, repositioning, resizing, styling, and deletion for any object."""
+    doc = pymupdf.open(stream=pdf_bytes, filetype="pdf")
+    try:
+        page = doc[page_index]
+        v_data = _get_page_vellum_data(doc, page)
+
+        if object_type == "textbox":
+            # Find in VellumData boxes
+            boxes = v_data.get("boxes", [])
+            box = next((b for b in boxes if b.get("id") == object_id), None)
+            if box is None:
+                # Proximity fallback
+                for b in boxes:
+                    bx = b.get("bbox", [])
+                    if len(bx) == 4 and abs(bx[0] - orig_bbox[0]) < 10 and abs(bx[1] - orig_bbox[1]) < 10:
+                        box = b
+                        break
+
+            if box is not None:
+                # Remove previous text from content stream if not duplicating
+                if action != "duplicate":
+                    old_pdf_rect = pymupdf.Rect(rect_to_pdf(page, box.get("bbox", orig_bbox)))
+                    _remove_glyphs(page, old_pdf_rect)
+                    if box.get("background_hex") or (box.get("border_hex") and box.get("border_width", 0) > 0):
+                        page.add_redact_annot(old_pdf_rect, fill=False)
+                        page.apply_redactions(graphics=pymupdf.PDF_REDACT_LINE_ART_REMOVE_IF_COVERED, text=0, images=0)
+
+                if action == "delete":
+                    v_data["boxes"] = [b for b in boxes if b.get("id") != box["id"]]
+                    _set_page_vellum_data(doc, page, v_data)
+                    return doc.tobytes(garbage=1, deflate=True)
+
+                # Determine target bbox
+                if action == "duplicate":
+                    target_bbox = [orig_bbox[0] + 20, orig_bbox[1] + 20, orig_bbox[2] + 20, orig_bbox[3] + 20]
+                    target_id = f"vbox_{int(time.time() * 1000)}_{random.randint(100, 999)}"
+                else:
+                    target_bbox = new_bbox or orig_bbox
+                    target_id = box["id"]
+
+                final_text = text if text is not None else box.get("text", "")
+                final_font = font_name or box.get("font", "helv")
+                final_size = font_size if font_size is not None else box.get("size", 12.0)
+                final_color = color_hex or box.get("color", "#000000")
+                final_bold = bold if bold is not None else box.get("bold", False)
+                final_italic = italic if italic is not None else box.get("italic", False)
+                final_align = align or box.get("align", "left")
+
+                d = pymupdf.Rect(target_bbox)
+                if d.width < 20:
+                    d.x1 = d.x0 + 100
+                if d.height < final_size * 1.4:
+                    d.y1 = d.y0 + max(final_size * 2.0, final_size * 1.3 * (final_text.count("\n") + 1) + 8)
+
+                inner = pymupdf.Rect(rect_to_pdf(page, d))
+                info = resolve_pdf_font(final_font, bold=final_bold, italic=final_italic, text_content=final_text)
+                align_code = ALIGN_MAP.get(final_align, pymupdf.TEXT_ALIGN_LEFT)
+                page.insert_textbox(
+                    inner,
+                    final_text,
+                    fontsize=float(final_size),
+                    fontname=info["fontname"],
+                    fontfile=info["fontfile"],
+                    color=hex_to_rgb_float(final_color),
+                    align=align_code,
+                    rotate=page.rotation,
+                )
+
+                updated_box = {
+                    "id": target_id,
+                    "type": "textbox",
+                    "text": final_text,
+                    "bbox": [round(float(v), 2) for v in target_bbox],
+                    "font": final_font,
+                    "size": round(float(final_size), 2),
+                    "color": final_color,
+                    "bold": final_bold,
+                    "italic": final_italic,
+                    "align": final_align,
+                    "background_hex": box.get("background_hex"),
+                    "border_hex": box.get("border_hex"),
+                    "border_width": box.get("border_width", 0),
+                }
+                if action == "duplicate":
+                    v_data.setdefault("boxes", []).append(updated_box)
+                else:
+                    b_idx = next(i for i, b in enumerate(boxes) if b.get("id") == box["id"])
+                    v_data["boxes"][b_idx] = updated_box
+                _set_page_vellum_data(doc, page, v_data)
+                return doc.tobytes(garbage=1, deflate=True)
+            else:
+                # Text box was not in VellumData, fall back to edit_text_span
+                doc.close()
+                res = edit_text_span(
+                    pdf_bytes,
+                    page_index,
+                    orig_bbox=orig_bbox,
+                    new_bbox=new_bbox if action in ("transform", "move", "update_style") else None,
+                    new_text="" if action == "delete" else (text if text is not None else ""),
+                    font_name=font_name,
+                    font_size=font_size or 12.0,
+                    color_hex=color_hex or "#000000",
+                    bold=bold or False,
+                    italic=italic or False,
+                    align=align or "left",
+                )
+                return res["pdf_bytes"]
+
+        elif object_type == "shape":
+            shapes = v_data.get("shapes", [])
+            shape = next((s for s in shapes if s.get("id") == object_id), None)
+            if shape is None:
+                for s in shapes:
+                    sb = s.get("bbox", [])
+                    if len(sb) == 4 and abs(sb[0] - orig_bbox[0]) < 10 and abs(sb[1] - orig_bbox[1]) < 10:
+                        shape = s
+                        break
+
+            if shape is not None:
+                if action != "duplicate":
+                    old_pdf_rect = pymupdf.Rect(rect_to_pdf(page, shape.get("bbox", orig_bbox)))
+                    # Expand slightly to cover stroke borders
+                    old_pdf_rect.x0 -= 2
+                    old_pdf_rect.y0 -= 2
+                    old_pdf_rect.x1 += 2
+                    old_pdf_rect.y1 += 2
+                    page.add_redact_annot(old_pdf_rect, fill=False)
+                    page.apply_redactions(graphics=pymupdf.PDF_REDACT_LINE_ART_REMOVE_IF_COVERED, text=0, images=0)
+
+                if action == "delete":
+                    v_data["shapes"] = [s for s in shapes if s.get("id") != shape["id"]]
+                    _set_page_vellum_data(doc, page, v_data)
+                    return doc.tobytes(garbage=1, deflate=True)
+
+                if action == "duplicate":
+                    target_bbox = [orig_bbox[0] + 20, orig_bbox[1] + 20, orig_bbox[2] + 20, orig_bbox[3] + 20]
+                    target_id = f"vshape_{int(time.time() * 1000)}_{random.randint(100, 999)}"
+                else:
+                    target_bbox = new_bbox or orig_bbox
+                    target_id = shape["id"]
+
+                s_type = shape_type or shape.get("shape_type", "rect")
+                s_stroke = stroke_hex or shape.get("stroke_hex", "#1d4ed8")
+                s_fill = fill_hex if fill_hex is not None else shape.get("fill_hex")
+                s_width = stroke_width if stroke_width is not None else shape.get("stroke_width", 2.0)
+                s_opacity = opacity if opacity is not None else shape.get("opacity", 1.0)
+
+                sh = page.new_shape()
+                stroke_c = hex_to_rgb_float(s_stroke) if s_stroke else None
+                fill_c = hex_to_rgb_float(s_fill) if s_fill else None
+                p1 = pymupdf.Point(point_to_pdf(page, target_bbox[:2]))
+                p2 = pymupdf.Point(point_to_pdf(page, target_bbox[2:]))
+                rect = pymupdf.Rect(rect_to_pdf(page, target_bbox))
+
+                if s_type == "rect":
+                    sh.draw_rect(rect)
+                elif s_type in ("ellipse", "circle"):
+                    sh.draw_oval(rect)
+                elif s_type == "line":
+                    sh.draw_line(p1, p2)
+                elif s_type == "arrow":
+                    sh.draw_line(p1, p2)
+                    ang = math.atan2(p2.y - p1.y, p2.x - p1.x)
+                    head = max(8.0, float(s_width) * 4.0)
+                    for dlt in (-math.pi / 6, math.pi / 6):
+                        sh.draw_line(p2, pymupdf.Point(p2.x - head * math.cos(ang + dlt), p2.y - head * math.sin(ang + dlt)))
+                else:
+                    sh.draw_rect(rect)
+
+                sh.finish(
+                    color=stroke_c,
+                    fill=fill_c if s_type in ("rect", "ellipse", "circle") else None,
+                    width=float(s_width),
+                    stroke_opacity=float(s_opacity),
+                    fill_opacity=float(s_opacity),
+                )
+                sh.commit()
+
+                updated_shape = {
+                    "id": target_id,
+                    "type": "shape",
+                    "shape_type": s_type,
+                    "bbox": [round(float(v), 2) for v in target_bbox],
+                    "stroke_hex": s_stroke,
+                    "fill_hex": s_fill,
+                    "stroke_width": round(float(s_width), 2),
+                    "opacity": round(float(s_opacity), 2),
+                    "rotation": 0,
+                }
+                if action == "duplicate":
+                    v_data.setdefault("shapes", []).append(updated_shape)
+                else:
+                    s_idx = next(i for i, s in enumerate(shapes) if s.get("id") == shape["id"])
+                    v_data["shapes"][s_idx] = updated_shape
+                _set_page_vellum_data(doc, page, v_data)
+                return doc.tobytes(garbage=1, deflate=True)
+            else:
+                return pdf_bytes
+
+        elif object_type == "image":
+            doc.close()
+            if action == "delete":
+                return edit_image_object(pdf_bytes, page_index, xref=image_xref or 0, action="delete", orig_bbox=orig_bbox)
+            elif action in ("transform", "move", "update_style"):
+                return edit_image_object(
+                    pdf_bytes,
+                    page_index,
+                    xref=image_xref or 0,
+                    action="transform",
+                    orig_bbox=orig_bbox,
+                    new_bbox=new_bbox,
+                    rotation=rotation or 0,
+                )
+            elif action == "duplicate":
+                target_bbox = [orig_bbox[0] + 20, orig_bbox[1] + 20, orig_bbox[2] + 20, orig_bbox[3] + 20]
+                doc_img = pymupdf.open(stream=pdf_bytes, filetype="pdf")
+                try:
+                    data = _image_bytes(doc_img, image_xref or 0)
+                    p_img = doc_img[page_index]
+                    p_img.insert_image(pymupdf.Rect(rect_to_pdf(p_img, target_bbox)), stream=data, rotate=(int(rotation or 0) + p_img.rotation) % 360)
+                    return doc_img.tobytes(garbage=1, deflate=True)
+                finally:
+                    doc_img.close()
+
+        elif object_type in ("text_span", "text"):
+            doc.close()
+            if action == "delete":
+                res = edit_text_span(pdf_bytes, page_index, orig_bbox=orig_bbox, new_text="")
+                return res["pdf_bytes"]
+            elif action in ("transform", "move", "update_style"):
+                res = edit_text_span(
+                    pdf_bytes,
+                    page_index,
+                    orig_bbox=orig_bbox,
+                    new_bbox=new_bbox,
+                    new_text=text if text is not None else "",
+                    font_name=font_name,
+                    font_size=font_size or 12.0,
+                    color_hex=color_hex or "#000000",
+                    bold=bold or False,
+                    italic=italic or False,
+                    align=align or "left",
+                )
+                return res["pdf_bytes"]
+            elif action == "duplicate":
+                target_bbox = [orig_bbox[0] + 20, orig_bbox[1] + 20, orig_bbox[2] + 20, orig_bbox[3] + 20]
+                return add_text_object(
+                    pdf_bytes,
+                    page_index,
+                    text=text or "Copy",
+                    bbox=target_bbox,
+                    font_name=font_name or "helv",
+                    font_size=font_size or 12.0,
+                    color_hex=color_hex or "#000000",
+                    bold=bold or False,
+                    italic=italic or False,
+                    align=align or "left",
+                )
+
+        return pdf_bytes
+    finally:
+        if not doc.is_closed:
+            doc.close()
