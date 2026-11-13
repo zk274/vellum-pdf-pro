@@ -41,3 +41,4 @@ Enhanced the canvas interaction and inline editing pipeline on `feat/paragraph-e
 ## 3. Remaining Limitations
 - Mixed inline styles within a single paragraph (e.g., one bold word inside an otherwise regular-weight sentence) are unified to the paragraph's dominant font/size/color upon reflow (`is_mixed_style` is surfaced in the Properties Inspector).
 - Subsetted embedded fonts that lack newly typed glyphs fall back to standard Base-14/system fonts with an explicit warning in the status notification.
+
