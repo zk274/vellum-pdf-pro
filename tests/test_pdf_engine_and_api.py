@@ -1617,6 +1617,228 @@ def test_intelligent_paragraph_editing_reflow_overflow_and_safety(tmp_path: Path
         assert "subset" in r_sub_edit.json()["fallback_reason"].lower()
 
 
+def test_mixed_format_paragraph_runs_unicode_and_safety(tmp_path: Path):
+    """
+    Comprehensive regression tests for mixed-format paragraph editing:
+    1. Ordered style run extraction (bold, italic, regular, color, size, link_uri)
+    2. Partial run edit preserving surrounding run styles
+    3. Unicode + ligatures (fi/fl, accented chars, em-dash, Euro)
+    4. Mixed-run line wrapping + shrink_font proportional scaling
+    5. Hyperlink preservation across mixed-style runs
+    6. Rotated pages (90°, 270°) with mixed-style runs
+    7. Embedded/subset font warning & font_fallback_policy='refuse'
+    8. Undo/Redo and save-close-reopen persistence
+    """
+    # 1. Build PDF with mixed bold, italic, color, size, and hyperlink in one paragraph
+    doc = pymupdf.open()
+    page = doc.new_page(width=612, height=792)
+    x = 72.0
+    y = 100.0
+    segments = [
+        ("Intro ", "helv", 11.0, (0, 0, 0)),
+        ("BoldRed ", "hebo", 13.0, (0.85, 0.05, 0.05)),
+        ("ItalicBlue ", "heit", 11.0, (0.05, 0.2, 0.85)),
+        ("LinkHere", "helv", 11.0, (0.0, 0.4, 0.8)),
+    ]
+    link_rect = None
+    for text_seg, fname, fsize, col in segments:
+        page.insert_text((x, y), text_seg, fontname=fname, fontsize=fsize, color=col)
+        w = pymupdf.get_text_length(text_seg, fontname=fname, fontsize=fsize)
+        if text_seg == "LinkHere":
+            link_rect = pymupdf.Rect(x, y - fsize, x + w, y + 3)
+        x += w
+    if link_rect:
+        page.insert_link({"kind": pymupdf.LINK_URI, "from": link_rect, "uri": "https://vellumpdf.linux/docs"})
+
+    page.insert_text((72, 116), "Second line continues with regular text.", fontname="helv", fontsize=11, color=(0, 0, 0))
+    raw_pdf = doc.tobytes()
+    doc.close()
+
+    r_open = client.post(
+        "/api/docs/open-upload",
+        files={"file": ("mixed_runs.pdf", io.BytesIO(raw_pdf), "application/pdf")},
+    )
+    assert r_open.status_code == 200
+    doc_id = r_open.json()["doc_id"]
+
+    objs = client.get(f"/api/docs/{doc_id}/pages/0/objects").json()
+    blk = objs["text_blocks"][0]
+    runs = blk.get("runs", [])
+    assert len(runs) >= 4
+    assert "".join(r["text"] for r in runs) == blk["reflow_text"]
+    assert any(r["bold"] and r["color"].lower().startswith("#d") for r in runs)
+    assert any(r["italic"] and r["color"].lower().startswith("#0") for r in runs)
+    assert any(r.get("link_uri") == "https://vellumpdf.linux/docs" for r in runs)
+
+    # 2. Edit only the middle run while preserving surrounding bold/italic/color/size and link
+    edited_runs = [
+        {"text": "Intro ", "font": "helv", "size": 11.0, "color": "#000000", "bold": False, "italic": False},
+        {"text": "UpdatedBold ", "font": "helv", "size": 14.0, "color": "#cc0000", "bold": True, "italic": False},
+        {"text": "ItalicBlue ", "font": "helv", "size": 11.0, "color": "#0d33d9", "bold": False, "italic": True},
+        {"text": "LinkHere ", "font": "helv", "size": 11.0, "color": "#0066cc", "bold": False, "italic": False, "link_uri": "https://vellumpdf.linux/docs"},
+        {"text": "with Café — résumé €100 ﬁle ﬂow.", "font": "dejavu", "size": 11.0, "color": "#111111", "bold": False, "italic": False},
+    ]
+    r_edit = client.post(
+        f"/api/docs/{doc_id}/pages/0/edit-paragraph",
+        json={
+            "block_id": blk["id"],
+            "orig_bbox": blk["bbox"],
+            "expected_orig_text": blk["text"],
+            "new_text": "".join(r["text"] for r in edited_runs),
+            "runs": edited_runs,
+            "overflow_policy": "expand_box",
+        },
+    )
+    assert r_edit.status_code == 200
+    assert r_edit.json()["status"] == "ok"
+    after_objs = r_edit.json()["objects"]
+    after_blk = after_objs["text_blocks"][0]
+    all_after_text = " ".join(b["text"] for b in after_objs["text_blocks"])
+    assert "UpdatedBold" in all_after_text
+    assert "Café" in all_after_text
+    assert "€100" in all_after_text
+    # Verify hyperlink survived
+    assert any(lnk.get("uri") == "https://vellumpdf.linux/docs" for lnk in after_objs.get("links", []))
+    # Verify distinct bold red and italic blue spans exist in output
+    spans_after = after_objs["text_spans"]
+    assert any("UpdatedBold" in s["text"] and s.get("bold") for s in spans_after)
+    assert any("ItalicBlue" in s["text"] and s.get("italic") for s in spans_after)
+
+    # 3. Overflow check + shrink_font proportional scaling on mixed runs
+    tight_runs = [
+        {"text": "BoldHead ", "font": "helv", "size": 15.0, "color": "#cc0000", "bold": True, "italic": False},
+        {"text": " ".join(["Long mixed reflow content"] * 8), "font": "helv", "size": 11.0, "color": "#000000", "bold": False, "italic": False},
+    ]
+    r_ovf = client.post(
+        f"/api/docs/{doc_id}/pages/0/edit-paragraph",
+        json={
+            "block_id": after_blk["id"],
+            "orig_bbox": after_blk["bbox"],
+            "target_bbox": [72, 90, 260, 125],
+            "expected_orig_text": after_blk["text"],
+            "new_text": "".join(r["text"] for r in tight_runs),
+            "runs": tight_runs,
+            "overflow_policy": "check",
+        },
+    )
+    assert r_ovf.status_code == 200
+    assert r_ovf.json()["status"] == "overflow"
+    assert r_ovf.json()["overflow_info"]["required_height"] > r_ovf.json()["overflow_info"]["available_height"]
+
+    r_shrink = client.post(
+        f"/api/docs/{doc_id}/pages/0/edit-paragraph",
+        json={
+            "block_id": after_blk["id"],
+            "orig_bbox": after_blk["bbox"],
+            "target_bbox": [72, 90, 260, 125],
+            "expected_orig_text": after_blk["text"],
+            "new_text": "".join(r["text"] for r in tight_runs),
+            "runs": tight_runs,
+            "overflow_policy": "shrink_font",
+        },
+    )
+    assert r_shrink.status_code == 200
+    assert r_shrink.json()["status"] == "ok"
+
+    # 4. Undo / Redo + Save & Reopen persistence
+    r_undo = client.post(f"/api/docs/{doc_id}/undo")
+    assert r_undo.status_code == 200
+    assert "UpdatedBold" in client.get(f"/api/docs/{doc_id}/pages/0/objects").json()["text_blocks"][0]["text"]
+    r_redo = client.post(f"/api/docs/{doc_id}/redo")
+    assert r_redo.status_code == 200
+
+    saved_path = tmp_path / "mixed_saved.pdf"
+    r_save = client.post(f"/api/docs/{doc_id}/save", json={"target_path": str(saved_path)})
+    assert r_save.status_code == 200
+    reopened = pymupdf.open(str(saved_path))
+    assert "BoldHead" in reopened[0].get_text()
+    reopened.close()
+
+    # 5. Rotated pages (90°, 270°) with mixed-style runs
+    for rot in (90, 270):
+        d_rot = pymupdf.open()
+        p_rot = d_rot.new_page(width=612, height=792)
+        p_rot.insert_text((72, 100), "RotPlain ", fontname="helv", fontsize=11)
+        p_rot.insert_text((118, 100), "RotBold", fontname="hebo", fontsize=11, color=(0.8, 0, 0))
+        p_rot.set_rotation(rot)
+        r_ro = client.post(
+            "/api/docs/open-upload",
+            files={"file": (f"mix_rot_{rot}.pdf", io.BytesIO(d_rot.tobytes()), "application/pdf")},
+        )
+        assert r_ro.status_code == 200
+        rid = r_ro.json()["doc_id"]
+        rblk = client.get(f"/api/docs/{rid}/pages/0/objects").json()["text_blocks"][0]
+        r_re = client.post(
+            f"/api/docs/{rid}/pages/0/edit-paragraph",
+            json={
+                "block_id": rblk["id"],
+                "orig_bbox": rblk["bbox"],
+                "expected_orig_text": rblk["text"],
+                "new_text": f"MixPlain MixBold{rot}",
+                "runs": [
+                    {"text": "MixPlain ", "font": "helv", "size": 11, "color": "#000000", "bold": False, "italic": False},
+                    {"text": f"MixBold{rot}", "font": "helv", "size": 11, "color": "#cc0000", "bold": True, "italic": False},
+                ],
+                "overflow_policy": "expand_box",
+            },
+        )
+        assert r_re.status_code == 200
+        assert r_re.json()["status"] == "ok"
+        joined_rot = "".join(s["text"] for s in r_re.json()["objects"]["text_spans"])
+        assert f"MixBold{rot}" in joined_rot
+
+    # 6. Subset font fallback warning & font_fallback_policy='refuse'
+    dejavu_path = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
+    if os.path.exists(dejavu_path):
+        d_sub = pymupdf.open()
+        p_sub = d_sub.new_page(width=612, height=792)
+        p_sub.insert_font(fontname="dejavu", fontfile=dejavu_path)
+        p_sub.insert_text((72, 100), "Alpha Beta", fontname="dejavu", fontsize=12)
+        d_sub.subset_fonts()
+        r_so = client.post(
+            "/api/docs/open-upload",
+            files={"file": ("mix_sub.pdf", io.BytesIO(d_sub.tobytes()), "application/pdf")},
+        )
+        sid = r_so.json()["doc_id"]
+        sblk = client.get(f"/api/docs/{sid}/pages/0/objects").json()["text_blocks"][0]
+        sub_font_name = sblk["runs"][0]["font"]
+
+        # Refuse policy must block without modifying PDF
+        r_refuse = client.post(
+            f"/api/docs/{sid}/pages/0/edit-paragraph",
+            json={
+                "block_id": sblk["id"],
+                "orig_bbox": sblk["bbox"],
+                "expected_orig_text": sblk["text"],
+                "new_text": "Zebra Quick",
+                "runs": [{"text": "Zebra Quick", "font": sub_font_name, "size": 12, "color": "#000000", "bold": False, "italic": False}],
+                "overflow_policy": "expand_box",
+                "font_fallback_policy": "refuse",
+            },
+        )
+        assert r_refuse.status_code == 400
+        assert "Alpha Beta" in client.get(f"/api/docs/{sid}/pages/0/objects").json()["text_blocks"][0]["text"]
+
+        # warn_and_fallback succeeds with font_warnings populated
+        r_warn = client.post(
+            f"/api/docs/{sid}/pages/0/edit-paragraph",
+            json={
+                "block_id": sblk["id"],
+                "orig_bbox": sblk["bbox"],
+                "expected_orig_text": sblk["text"],
+                "new_text": "Zebra Quick",
+                "runs": [{"text": "Zebra Quick", "font": sub_font_name, "size": 12, "color": "#000000", "bold": False, "italic": False}],
+                "overflow_policy": "expand_box",
+                "font_fallback_policy": "warn_and_fallback",
+            },
+        )
+        assert r_warn.status_code == 200
+        assert r_warn.json()["status"] == "ok"
+        assert r_warn.json()["fallback_used"] is True
+        assert len(r_warn.json()["font_warnings"]) >= 1
+
+
+
 
 
 

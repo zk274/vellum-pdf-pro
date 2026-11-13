@@ -8,6 +8,12 @@ The project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html
 ## [Unreleased]
 
 ### Added
+- **Mixed-Format PDF Text Editing & Per-Run Style Preservation**:
+  - Enhanced `inspect_page_objects()` and `_build_paragraph_blocks()` in `backend/engine/direct_edit.py` to extract ordered `runs` (`text`, `font`, `family`, `size`, `color`, `bold`, `italic`, `is_embedded_font`, `is_subset_font`, `char_spacing`, `baseline`, `link_uri`) matching `reflow_text` 1:1.
+  - Added mixed-style word/character wrapping (`_resolve_run_font_and_metrics`, `_wrap_mixed_runs`), proportional `shrink_font` scaling across heterogeneous runs, per-run original font encoding checks with `font_warnings` and `font_fallback_policy` (`"warn_and_fallback"` | `"refuse"`), and per-run `/Link` URI restoration in `edit_paragraph_block()` and `POST /api/docs/{doc_id}/pages/{page_index}/edit-paragraph`.
+  - Created `src/richTextUtils.ts` and upgraded `.inline-paragraph-overlay` in `src/App.tsx` to a `contentEditable` rich inline paragraph editor with selection-aware Bold (`Ctrl+B`), Italic (`Ctrl+I`), Font Size, Color, and Font Family controls in both the floating toolbar and the right-hand **Paragraph Editor & Reflow** inspector, plus subset/embedded font warning banner.
+  - Added comprehensive backend/API tests (`test_mixed_format_paragraph_runs_unicode_and_safety`) and end-to-end packaged AppImage CDP verification (`scripts/verify_mixed_format_gui.cjs`).
+
 - **Acrobat-Style Intelligent Paragraph Editor & Safe Reflow (Issue #1)**:
   - Added multi-line paragraph block grouping in `backend/engine/direct_edit.py` (`inspect_page_objects` / `_build_paragraph_blocks`) that separates headings, multi-column text, table cells, and wide vertical gaps while preserving dominant font, size, color, bold/italic style, line height, and alignment.
   - Added `edit_paragraph_block()` and `POST /api/docs/{doc_id}/pages/{page_index}/edit-paragraph` with expected-text validation, greedy word-wrapping with long-word breaking, rotated-page support (0°/90°/180°/270°), neighbor collision detection, explicit overflow policies (`check`, `expand_box`, `shrink_font`, `force`), link preservation, and atomic rollback on verification failure.

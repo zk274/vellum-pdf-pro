@@ -147,12 +147,34 @@ export interface SelectedManipulableObject {
   data: VellumBoxObject | VellumShapeObject | ImageObject | TextSpanObject;
 }
 
+export interface TextRun {
+  text: string;
+  font: string;
+  family?: 'sans' | 'serif' | 'mono';
+  size: number;
+  color: string;
+  bold: boolean;
+  italic: boolean;
+  is_embedded_font?: boolean;
+  is_subset_font?: boolean;
+  char_spacing?: number;
+  baseline?: number;
+  link_uri?: string | null;
+}
+
+export interface FontWarningInfo {
+  original_font: string;
+  fallback_font: string;
+  reason: string;
+}
+
 export interface TextBlockObject {
   id: string;
   block_index: number;
   bbox: [number, number, number, number];
   text: string;
   reflow_text?: string;
+  runs?: TextRun[];
   span_ids: string[];
   line_bboxes?: Array<[number, number, number, number]>;
   first_origin?: [number, number];
@@ -183,6 +205,8 @@ export interface EditParagraphRequest {
   line_height?: number;
   keep_original_font?: boolean;
   overflow_policy?: 'check' | 'expand_box' | 'shrink_font' | 'force';
+  runs?: TextRun[] | null;
+  font_fallback_policy?: 'warn_and_fallback' | 'refuse';
 }
 
 export interface ParagraphOverflowInfo {
@@ -203,6 +227,7 @@ export interface EditParagraphResponse {
   font_strategy?: string;
   fallback_used?: boolean;
   fallback_reason?: string;
+  font_warnings?: FontWarningInfo[];
   applied_font?: string;
   final_bbox?: [number, number, number, number];
   final_font_size?: number;

@@ -151,6 +151,17 @@ class EditTextSpanRequest(BaseModel):
     keep_original_font: bool = True
 
 
+class TextRunPayload(BaseModel):
+    text: str
+    font: Optional[str] = None
+    size: Optional[float] = None
+    color: Optional[str] = None
+    bold: Optional[bool] = None
+    italic: Optional[bool] = None
+    char_spacing: float = 0.0
+    link_uri: Optional[str] = None
+
+
 class EditParagraphRequest(BaseModel):
     block_id: Optional[str] = None
     orig_bbox: List[float]
@@ -166,6 +177,8 @@ class EditParagraphRequest(BaseModel):
     line_height: float = 1.25
     keep_original_font: bool = True
     overflow_policy: str = "check"
+    runs: Optional[List[TextRunPayload]] = None
+    font_fallback_policy: str = "warn_and_fallback"
 
 
 class AddTextRequest(BaseModel):
@@ -812,6 +825,8 @@ def api_edit_paragraph_block(doc_id: str, page_index: int, req: EditParagraphReq
         line_height=req.line_height,
         keep_original_font=req.keep_original_font,
         overflow_policy=req.overflow_policy,
+        runs=[r.model_dump() for r in req.runs] if req.runs else None,
+        font_fallback_policy=req.font_fallback_policy,
     )
     if res["status"] == "ok":
         action_label = f"Edit Paragraph ('{req.new_text[:24]}')" if req.new_text.strip() else "Delete Paragraph"
@@ -823,6 +838,7 @@ def api_edit_paragraph_block(doc_id: str, page_index: int, req: EditParagraphReq
             "font_strategy": res.get("font_strategy", ""),
             "fallback_used": res.get("fallback_used", False),
             "fallback_reason": res.get("fallback_reason", ""),
+            "font_warnings": res.get("font_warnings", []),
             "applied_font": res.get("applied_font", ""),
             "final_bbox": res.get("final_bbox"),
             "final_font_size": res.get("final_font_size"),

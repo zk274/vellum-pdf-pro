@@ -174,7 +174,15 @@ def _set_page_vellum_data(doc: pymupdf.Document, page: pymupdf.Page, data: Dict[
         pass
 
 
-def _build_paragraph_blocks(page_index: int, text_spans: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def _rects_intersect_disp(a: List[float], b: List[float]) -> bool:
+    return a[0] < b[2] - 0.5 and a[2] > b[0] + 0.5 and a[1] < b[3] - 0.5 and a[3] > b[1] + 0.5
+
+
+def _build_paragraph_blocks(
+    page_index: int,
+    text_spans: List[Dict[str, Any]],
+    links: Optional[List[Dict[str, Any]]] = None,
+) -> List[Dict[str, Any]]:
     """Group extracted display-space spans into safe, logical paragraphs.
 
     Avoids merging separate columns, table cells, headings with body paragraphs,
@@ -316,24 +324,93 @@ def _build_paragraph_blocks(page_index: int, text_spans: List[Dict[str, Any]]) -
             elif right_spread < 4.0 and left_spread > 8.0:
                 align = "right"
 
-        # Build reflowable prose text alongside exact line-broken text
+        # Build reflowable prose text AND ordered styled runs matching reflow_text 1:1
         exact_lines = [seg["text"] for seg in segs]
         reflow_parts: List[str] = []
+        raw_runs: List[Dict[str, Any]] = []
+        uri_links = [lk for lk in (links or []) if lk.get("uri")]
+
+        def _span_link_uri(sp: Dict[str, Any]) -> Optional[str]:
+            sb = sp["bbox"]
+            for lk in uri_links:
+                if _rects_intersect_disp(sb, lk["bbox"]):
+                    return str(lk["uri"])
+            return None
+
+        def _append_run(txt_piece: str, sp: Dict[str, Any]) -> None:
+            if not txt_piece:
+                return
+            l_uri = _span_link_uri(sp)
+            if raw_runs:
+                prev_r = raw_runs[-1]
+                if (
+                    prev_r["font"] == sp["font"]
+                    and prev_r["size"] == sp["size"]
+                    and prev_r["color"] == sp["color"]
+                    and prev_r["bold"] == bool(sp["bold"])
+                    and prev_r["italic"] == bool(sp["italic"])
+                    and prev_r["link_uri"] == l_uri
+                ):
+                    prev_r["text"] += txt_piece
+                    return
+            raw_runs.append(
+                {
+                    "text": txt_piece,
+                    "font": sp["font"],
+                    "family": sp.get("family", "sans"),
+                    "size": float(sp["size"]),
+                    "color": sp["color"],
+                    "bold": bool(sp["bold"]),
+                    "italic": bool(sp["italic"]),
+                    "is_embedded_font": bool(sp.get("is_embedded_font", False)),
+                    "is_subset_font": bool(sp.get("is_subset_font", False)),
+                    "char_spacing": 0.0,
+                    "baseline": round(float(sp["origin"][1]), 2),
+                    "link_uri": l_uri,
+                }
+            )
+
         for idx_s, seg in enumerate(segs):
-            txt = seg["text"].strip()
+            seg_spans = seg["spans"]
             if idx_s == 0:
-                reflow_parts.append(txt)
-                continue
-            prev_seg = segs[idx_s - 1]
-            prev_w = prev_seg["bbox"][2] - prev_seg["bbox"][0]
-            prev_txt = prev_seg["text"].rstrip()
-            # Keep hard newline if previous line is noticeably short (< 72% width) or ends with colon
-            if prev_w < para_w * 0.72 or prev_txt.endswith(":"):
-                reflow_parts.append("\n" + txt)
-            elif prev_txt.endswith("-") and len(prev_txt) > 2 and prev_txt[-2].isalpha():
-                reflow_parts[-1] = reflow_parts[-1][:-1] + txt
+                pass
             else:
-                reflow_parts.append(" " + txt)
+                prev_seg = segs[idx_s - 1]
+                prev_w = prev_seg["bbox"][2] - prev_seg["bbox"][0]
+                prev_txt = prev_seg["text"].rstrip()
+                if prev_w < para_w * 0.72 or prev_txt.endswith(":"):
+                    reflow_parts.append("\n")
+                    _append_run("\n", prev_seg["spans"][-1])
+                elif prev_txt.endswith("-") and len(prev_txt) > 2 and prev_txt[-2].isalpha():
+                    if reflow_parts and reflow_parts[-1].endswith("-"):
+                        reflow_parts[-1] = reflow_parts[-1][:-1]
+                    if raw_runs and raw_runs[-1]["text"].endswith("-"):
+                        raw_runs[-1]["text"] = raw_runs[-1]["text"][:-1]
+                else:
+                    reflow_parts.append(" ")
+                    _append_run(" ", prev_seg["spans"][-1])
+
+            for sp_i, sp in enumerate(seg_spans):
+                sp_txt = sp["text"]
+                if sp_i == 0:
+                    sp_txt = sp_txt.lstrip()
+                else:
+                    gap = sp["bbox"][0] - seg_spans[sp_i - 1]["bbox"][2]
+                    prev_r_txt = raw_runs[-1]["text"] if raw_runs else ""
+                    if (
+                        gap > max(1.5, sp["size"] * 0.14)
+                        and not prev_r_txt.endswith((" ", "\n"))
+                        and not sp_txt.startswith(" ")
+                    ):
+                        reflow_parts.append(" ")
+                        _append_run(" ", seg_spans[sp_i - 1])
+                if sp_i == len(seg_spans) - 1:
+                    sp_txt = sp_txt.rstrip()
+                if sp_txt:
+                    reflow_parts.append(sp_txt)
+                    _append_run(sp_txt, sp)
+
+        reflow_text = "".join(reflow_parts)
 
         blocks_out.append(
             {
@@ -341,7 +418,8 @@ def _build_paragraph_blocks(page_index: int, text_spans: List[Dict[str, Any]]) -
                 "block_index": segs[0]["block_index"],
                 "bbox": [x0, y0, x1, y1],
                 "text": "\n".join(exact_lines),
-                "reflow_text": "".join(reflow_parts),
+                "reflow_text": reflow_text,
+                "runs": raw_runs,
                 "span_ids": [sp["id"] for sp in all_spans],
                 "line_bboxes": [seg["bbox"] for seg in segs],
                 "first_origin": segs[0]["origin"],
@@ -444,7 +522,20 @@ def inspect_page_objects(pdf_bytes: bytes, page_index: int = 0) -> Dict[str, Any
                         }
                     )
 
-        text_blocks = _build_paragraph_blocks(page_index, text_spans)
+        links: List[Dict[str, Any]] = []
+        for l_idx, link in enumerate(page.get_links()):
+            links.append(
+                {
+                    "id": f"link_{page_index}_{l_idx}",
+                    "link_index": l_idx,
+                    "kind": int(link.get("kind", 0)),
+                    "uri": link.get("uri", "") or "",
+                    "target_page": int(link.get("page", -1)) if link.get("page") is not None else -1,
+                    "bbox": rect_to_display(page, link["from"]),
+                }
+            )
+
+        text_blocks = _build_paragraph_blocks(page_index, text_spans, links=links)
 
         images: List[Dict[str, Any]] = []
         for i_idx, info in enumerate(page.get_image_info(xrefs=True)):
@@ -476,19 +567,6 @@ def inspect_page_objects(pdf_bytes: bytes, page_index: int = 0) -> Dict[str, Any
                     "colorspace": str(info.get("cs-name", "")),
                     "bpc": int(info.get("bpc", 8)),
                     "thumbnail_base64": thumb,
-                }
-            )
-
-        links: List[Dict[str, Any]] = []
-        for l_idx, link in enumerate(page.get_links()):
-            links.append(
-                {
-                    "id": f"link_{page_index}_{l_idx}",
-                    "link_index": l_idx,
-                    "kind": int(link.get("kind", 0)),
-                    "uri": link.get("uri", "") or "",
-                    "target_page": int(link.get("page", -1)) if link.get("page") is not None else -1,
-                    "bbox": rect_to_display(page, link["from"]),
                 }
             )
 
@@ -1712,6 +1790,208 @@ def _wrap_paragraph_lines(
     return out_lines
 
 
+def _resolve_run_font_and_metrics(
+    run: Dict[str, Any],
+    doc: Optional["pymupdf.Document"] = None,
+    page_index: int = 0,
+    keep_original_font: bool = True,
+) -> Dict[str, Any]:
+    """Resolve PyMuPDF Font metrics and optional original-font encoding for a styled run."""
+    r_font = str(run.get("font") or "helv")
+    r_bold = bool(run.get("bold", False))
+    r_italic = bool(run.get("italic", False))
+    r_text = str(run.get("text") or "A")
+    info = resolve_pdf_font(r_font, bold=r_bold, italic=r_italic, text_content=r_text or "A")
+    try:
+        m_font = (
+            pymupdf.Font(fontfile=info["fontfile"])
+            if info.get("fontfile")
+            else pymupdf.Font(info["fontname"])
+        )
+    except Exception:
+        m_font = pymupdf.Font("helv")
+
+    orig_enc = None
+    fallback_reason = ""
+    if doc is not None and keep_original_font and r_text.strip():
+        # Check if r_font exists on the page and can encode this run's text
+        enc, reason = _encode_with_original_font(doc, page_index, r_font, r_text)
+        if enc is not None:
+            orig_enc = enc
+        else:
+            fallback_reason = reason
+    return {
+        "info": info,
+        "metric_font": m_font,
+        "orig_enc": orig_enc,
+        "fallback_reason": fallback_reason,
+    }
+
+
+def _wrap_mixed_runs(
+    runs: List[Dict[str, Any]],
+    max_width: float,
+    scale_factor: float = 1.0,
+    doc: Optional["pymupdf.Document"] = None,
+    page_index: int = 0,
+    keep_original_font: bool = True,
+) -> List[Dict[str, Any]]:
+    """Wrap ordered styled runs into lines that fit `max_width`, preserving per-run styles.
+
+    Returns a list of line dicts:
+      {"segments": [{"text", "font", "size", "color", "bold", "italic", "char_spacing", "link_uri", "width", "info", "metric_font"}],
+       "width": float, "max_size": float}
+    """
+    safe_width = max(24.0, float(max_width))
+    # Build per-run font cache
+    run_resolved: List[Dict[str, Any]] = []
+    for r in runs:
+        res = _resolve_run_font_and_metrics(r, doc=doc, page_index=page_index, keep_original_font=keep_original_font)
+        sz = max(6.0, round(float(r.get("size") or 12.0) * scale_factor, 2))
+        run_resolved.append({**r, "size": sz, "_res": res})
+
+    # Convert runs into logical paragraphs (split on '\n'), then into word/space tokens
+    # A word token can span multiple runs if there is no whitespace between them.
+    paragraphs: List[List[Dict[str, Any]]] = [[]]
+    for r in run_resolved:
+        txt = str(r.get("text") or "")
+        parts = txt.split("\n")
+        for p_idx, part in enumerate(parts):
+            if p_idx > 0:
+                paragraphs.append([])
+            if not part:
+                continue
+            # Split part into alternating space and non-space chunks
+            i = 0
+            n = len(part)
+            while i < n:
+                if part[i] == " ":
+                    j = i
+                    while j < n and part[j] == " ":
+                        j += 1
+                    paragraphs[-1].append({"is_space": True, "pieces": [{**r, "text": part[i:j]}]})
+                    i = j
+                else:
+                    j = i
+                    while j < n and part[j] != " ":
+                        j += 1
+                    piece = {**r, "text": part[i:j]}
+                    # Merge into previous non-space word token if there was no space between runs
+                    if paragraphs[-1] and not paragraphs[-1][-1]["is_space"]:
+                        paragraphs[-1][-1]["pieces"].append(piece)
+                    else:
+                        paragraphs[-1].append({"is_space": False, "pieces": [piece]})
+                    i = j
+
+    def _piece_width(pc: Dict[str, Any]) -> float:
+        mf: pymupdf.Font = pc["_res"]["metric_font"]
+        cs = float(pc.get("char_spacing") or 0.0)
+        return float(mf.text_length(pc["text"], fontsize=pc["size"])) + max(0, len(pc["text"]) - 1) * cs
+
+    def _token_width(tok: Dict[str, Any]) -> float:
+        return sum(_piece_width(pc) for pc in tok["pieces"])
+
+    def _finalize_line(tokens: List[Dict[str, Any]], fallback_size: float) -> Dict[str, Any]:
+        # Strip trailing space tokens
+        trimmed = list(tokens)
+        while trimmed and trimmed[-1]["is_space"]:
+            trimmed.pop()
+        while trimmed and trimmed[0]["is_space"]:
+            trimmed.pop(0)
+        segments: List[Dict[str, Any]] = []
+        for tok in trimmed:
+            for pc in tok["pieces"]:
+                if not pc["text"]:
+                    continue
+                if segments:
+                    prev = segments[-1]
+                    if (
+                        prev["font"] == pc["font"]
+                        and prev["size"] == pc["size"]
+                        and prev["color"] == pc["color"]
+                        and prev["bold"] == bool(pc.get("bold"))
+                        and prev["italic"] == bool(pc.get("italic"))
+                        and prev.get("link_uri") == pc.get("link_uri")
+                    ):
+                        prev["text"] += pc["text"]
+                        prev["width"] = _piece_width({**pc, "text": prev["text"]})
+                        continue
+                segments.append(
+                    {
+                        "text": pc["text"],
+                        "font": pc["font"],
+                        "size": pc["size"],
+                        "color": pc.get("color") or "#000000",
+                        "bold": bool(pc.get("bold", False)),
+                        "italic": bool(pc.get("italic", False)),
+                        "char_spacing": float(pc.get("char_spacing") or 0.0),
+                        "link_uri": pc.get("link_uri"),
+                        "width": _piece_width(pc),
+                        "info": pc["_res"]["info"],
+                        "metric_font": pc["_res"]["metric_font"],
+                    }
+                )
+        total_w = sum(s["width"] for s in segments)
+        max_sz = max((s["size"] for s in segments), default=fallback_size)
+        return {"segments": segments, "width": total_w, "max_size": max_sz}
+
+    default_sz = run_resolved[0]["size"] if run_resolved else 12.0
+    lines_out: List[Dict[str, Any]] = []
+
+    for para_tokens in paragraphs:
+        if not para_tokens or all(t["is_space"] for t in para_tokens):
+            lines_out.append({"segments": [], "width": 0.0, "max_size": default_sz})
+            continue
+
+        curr_tokens: List[Dict[str, Any]] = []
+        curr_w = 0.0
+        for tok in para_tokens:
+            if tok["is_space"] and not curr_tokens:
+                continue
+            tw = _token_width(tok)
+            if curr_tokens and curr_w + tw <= safe_width:
+                curr_tokens.append(tok)
+                curr_w += tw
+            elif not curr_tokens and tw <= safe_width:
+                curr_tokens.append(tok)
+                curr_w += tw
+            else:
+                if curr_tokens:
+                    lines_out.append(_finalize_line(curr_tokens, default_sz))
+                    curr_tokens = []
+                    curr_w = 0.0
+                if tok["is_space"]:
+                    continue
+                if tw <= safe_width:
+                    curr_tokens.append(tok)
+                    curr_w = tw
+                else:
+                    # Break unbreakable wide word character-by-character across its styled pieces
+                    chunk_pieces: List[Dict[str, Any]] = []
+                    chunk_w = 0.0
+                    for pc in tok["pieces"]:
+                        for ch in pc["text"]:
+                            ch_pc = {**pc, "text": ch}
+                            cw = _piece_width(ch_pc)
+                            if chunk_pieces and chunk_w + cw > safe_width:
+                                lines_out.append(_finalize_line([{"is_space": False, "pieces": chunk_pieces}], default_sz))
+                                chunk_pieces = [ch_pc]
+                                chunk_w = cw
+                            else:
+                                if chunk_pieces and chunk_pieces[-1]["font"] == ch_pc["font"] and chunk_pieces[-1]["size"] == ch_pc["size"] and chunk_pieces[-1]["color"] == ch_pc["color"] and chunk_pieces[-1]["bold"] == ch_pc["bold"] and chunk_pieces[-1]["italic"] == ch_pc["italic"] and chunk_pieces[-1].get("link_uri") == ch_pc.get("link_uri"):
+                                    chunk_pieces[-1]["text"] += ch
+                                else:
+                                    chunk_pieces.append(ch_pc)
+                                chunk_w += cw
+                    if chunk_pieces:
+                        curr_tokens = [{"is_space": False, "pieces": chunk_pieces}]
+                        curr_w = chunk_w
+        if curr_tokens:
+            lines_out.append(_finalize_line(curr_tokens, default_sz))
+
+    return lines_out
+
+
 def edit_paragraph_block(
     pdf_bytes: bytes,
     page_index: int,
@@ -1729,6 +2009,8 @@ def edit_paragraph_block(
     line_height: float = 1.25,
     keep_original_font: bool = True,
     overflow_policy: str = "check",
+    runs: Optional[List[Dict[str, Any]]] = None,
+    font_fallback_policy: str = "warn_and_fallback",
 ) -> Dict[str, Any]:
     """Atomically edit and reflow a paragraph block with overflow & neighbor protection.
 
@@ -1825,6 +2107,28 @@ def edit_paragraph_block(
         else:
             max_safe_height = max(box_height, max_safe_y1 - disp_target[1])
 
+        norm_runs: List[Dict[str, Any]] = []
+        if runs:
+            for r in runs:
+                r_txt = str(r.get("text") or "")
+                if not r_txt:
+                    continue
+                norm_runs.append(
+                    {
+                        "text": r_txt,
+                        "font": str(r.get("font") or eff_font_name),
+                        "size": float(r.get("size") or eff_font_size),
+                        "color": str(r.get("color") or eff_color_hex),
+                        "bold": eff_bold if r.get("bold") is None else bool(r.get("bold")),
+                        "italic": eff_italic if r.get("italic") is None else bool(r.get("italic")),
+                        "char_spacing": float(r.get("char_spacing") or 0.0),
+                        "link_uri": r.get("link_uri"),
+                    }
+                )
+        use_mixed_runs = len(norm_runs) > 0
+        if use_mixed_runs and not new_text:
+            new_text = "".join(r["text"] for r in norm_runs)
+
         info = resolve_pdf_font(eff_font_name, bold=eff_bold, italic=eff_italic, text_content=new_text or "A")
         try:
             metric_font = (
@@ -1835,14 +2139,31 @@ def edit_paragraph_block(
         except Exception:
             metric_font = pymupdf.Font("helv")
 
-        def measure_for_size(fs: float) -> Tuple[List[str], float]:
+        mixed_lines: List[Dict[str, Any]] = []
+
+        def measure_for_size(fs: float) -> Tuple[List[str], float, List[Dict[str, Any]]]:
+            if use_mixed_runs:
+                scale = fs / max(6.0, eff_font_size)
+                m_lines = _wrap_mixed_runs(
+                    norm_runs,
+                    box_width,
+                    scale_factor=scale,
+                    doc=doc,
+                    page_index=page_index,
+                    keep_original_font=keep_original_font,
+                )
+                if not m_lines or not any(ln["segments"] for ln in m_lines):
+                    return [], 0.0, m_lines
+                req_h = sum(ln["max_size"] * eff_line_height for ln in m_lines[:-1]) + m_lines[-1]["max_size"] * 1.15
+                str_lines = ["".join(s["text"] for s in ln["segments"]) for ln in m_lines]
+                return str_lines, max(fs * 1.15, req_h), m_lines
             lines_w = _wrap_paragraph_lines(new_text, box_width, metric_font, fs)
             if not lines_w:
-                return [], 0.0
+                return [], 0.0, []
             req_h = max(fs * 1.15, (len(lines_w) - 1) * fs * eff_line_height + fs * 1.15)
-            return lines_w, req_h
+            return lines_w, req_h, []
 
-        wrapped_lines, required_height = measure_for_size(eff_font_size)
+        wrapped_lines, required_height, mixed_lines = measure_for_size(eff_font_size)
         collides_if_expanded = required_height > max_safe_height + 1.5
 
         if new_text.strip() and required_height > box_height + 2.5:
@@ -1851,7 +2172,7 @@ def edit_paragraph_block(
                 suggested_fs = None
                 fs_try = round(eff_font_size - 0.5, 1)
                 while fs_try >= 6.0:
-                    _, h_try = measure_for_size(fs_try)
+                    _, h_try, _ = measure_for_size(fs_try)
                     if h_try <= box_height + 1.5:
                         suggested_fs = fs_try
                         break
@@ -1890,10 +2211,11 @@ def edit_paragraph_block(
                 fitted = False
                 fs_try = round(eff_font_size - 0.5, 1)
                 while fs_try >= 6.0:
-                    w_try, h_try = measure_for_size(fs_try)
+                    w_try, h_try, m_try = measure_for_size(fs_try)
                     if h_try <= box_height + 1.5:
                         eff_font_size = fs_try
                         wrapped_lines = w_try
+                        mixed_lines = m_try
                         required_height = h_try
                         fitted = True
                         break
@@ -1913,12 +2235,13 @@ def edit_paragraph_block(
                         },
                     }
 
-        # 4. Pre-compute original font encoding BEFORE glyph removal
+        # 4. Pre-compute original font encoding & glyph availability BEFORE glyph removal
         orig_font_ref = matched_block.get("dominant_font")
         encoded_lines: Optional[List[Dict[str, Any]]] = None
         enc_meta: Dict[str, Any] = {}
         fallback_used = False
         fallback_reason = ""
+        font_warnings: List[Dict[str, str]] = []
         method = "deleted" if not new_text.strip() else ""
         applied_font = eff_font_name
 
@@ -1928,7 +2251,42 @@ def edit_paragraph_block(
             and (bold is None or bool(bold) == bool(matched_block.get("bold")))
             and (italic is None or bool(italic) == bool(matched_block.get("italic")))
         )
-        if new_text.strip() and keep_original_font and orig_font_ref and same_style and eff_align in ("left", ""):
+        if use_mixed_runs and new_text.strip():
+            # Pre-check each segment for original font encoding vs fallback
+            orig_span_fonts = {s["font"]: (s["bold"], s["italic"]) for s in target_spans}
+            for ln in mixed_lines:
+                for seg in ln["segments"]:
+                    seg["orig_enc"] = None
+                    seg_txt = seg["text"]
+                    if not seg_txt.strip():
+                        continue
+                    s_font = seg["font"]
+                    if keep_original_font and s_font in orig_span_fonts:
+                        ob, oi = orig_span_fonts[s_font]
+                        if bool(seg["bold"]) == bool(ob) and bool(seg["italic"]) == bool(oi):
+                            enc, reason = _encode_with_original_font(doc, page_index, s_font, seg_txt)
+                            if enc is not None:
+                                seg["orig_enc"] = enc
+                            else:
+                                fallback_used = True
+                                fb_name = seg["info"]["base14"] if not seg["info"].get("fontfile") else seg["info"]["fontfile"].rsplit("/", 1)[-1]
+                                font_warnings.append(
+                                    {
+                                        "original_font": s_font,
+                                        "fallback_font": fb_name,
+                                        "reason": reason,
+                                    }
+                                )
+                                if not fallback_reason:
+                                    fallback_reason = reason
+            if font_fallback_policy == "refuse" and font_warnings:
+                return {
+                    "status": "error",
+                    "error": font_warnings[0]["reason"],
+                    "font_warnings": font_warnings,
+                    "pdf_bytes": pdf_bytes,
+                }
+        elif new_text.strip() and keep_original_font and orig_font_ref and same_style and eff_align in ("left", ""):
             encoded_lines = []
             for i, ln in enumerate(wrapped_lines):
                 if not ln:
@@ -1984,7 +2342,105 @@ def edit_paragraph_block(
         perp_x, perp_y = -line_dir[1], line_dir[0]
 
         if new_text.strip():
-            if encoded_lines is not None and enc_meta:
+            if use_mixed_runs:
+                y_offset = 0.0
+                used_orig_any = False
+                used_sub_any = False
+                run_links_to_insert: List[Dict[str, Any]] = []
+                for ln_idx, ln in enumerate(mixed_lines):
+                    if ln_idx > 0:
+                        prev_max_sz = mixed_lines[ln_idx - 1]["max_size"]
+                        y_offset += prev_max_sz * eff_line_height
+                    x_offset = 0.0
+                    if eff_align == "center":
+                        x_offset = max(0.0, (box_width - ln["width"]) * 0.5)
+                    elif eff_align == "right":
+                        x_offset = max(0.0, box_width - ln["width"])
+                    cursor_x = x_offset
+                    for seg in ln["segments"]:
+                        seg_txt = seg["text"]
+                        seg_w = seg["width"]
+                        seg_sz = seg["size"]
+                        seg_rgb = hex_to_rgb_float(seg["color"])
+                        pt = pymupdf.Point(
+                            base.x + y_offset * perp_x + cursor_x * line_dir[0],
+                            base.y + y_offset * perp_y + cursor_x * line_dir[1],
+                        )
+                        if seg_txt.strip():
+                            if seg.get("orig_enc") is not None:
+                                _write_original_font_lines(
+                                    doc,
+                                    page,
+                                    [{"origin": (pt.x, pt.y), "hex": seg["orig_enc"]["hex"]}],
+                                    seg["orig_enc"]["refname"],
+                                    seg["orig_enc"]["xref"],
+                                    seg_sz,
+                                    seg_rgb,
+                                    line_dir=line_dir,
+                                )
+                                used_orig_any = True
+                            else:
+                                s_info = seg["info"]
+                                page.insert_text(
+                                    pt,
+                                    seg_txt,
+                                    fontsize=seg_sz,
+                                    fontname=s_info["fontname"],
+                                    fontfile=s_info["fontfile"],
+                                    color=seg_rgb,
+                                    rotate=text_rot,
+                                )
+                                used_sub_any = True
+                        if seg.get("link_uri") and seg_txt.strip():
+                            end_pt = pymupdf.Point(
+                                pt.x + seg_w * line_dir[0],
+                                pt.y + seg_w * line_dir[1],
+                            )
+                            lx0 = min(pt.x, end_pt.x) - 1.0
+                            lx1 = max(pt.x, end_pt.x) + 1.0
+                            ly0 = min(pt.y, end_pt.y) - seg_sz * 0.9
+                            ly1 = max(pt.y, end_pt.y) + seg_sz * 0.25
+                            run_links_to_insert.append(
+                                {
+                                    "kind": pymupdf.LINK_URI,
+                                    "from": pymupdf.Rect(lx0, ly0, lx1, ly1),
+                                    "uri": seg["link_uri"],
+                                }
+                            )
+                        cursor_x += seg_w
+                if used_orig_any and used_sub_any:
+                    method = "mixed_font"
+                elif used_orig_any:
+                    method = "original_font"
+                else:
+                    method = "substitute_font"
+                for rl in run_links_to_insert:
+                    try:
+                        page.insert_link(rl)
+                    except Exception:
+                        pass
+                # Also restore any non-URI or unaffected links from affected_links not covered by run_links
+                covered_uris = {rl["uri"] for rl in run_links_to_insert}
+                for lk in affected_links:
+                    if lk.get("uri") and lk.get("uri") in covered_uris:
+                        continue
+                    try:
+                        old_from = pymupdf.Rect(lk["from"])
+                        new_from = pymupdf.Rect(
+                            old_from.x0 + delta.x,
+                            old_from.y0 + delta.y,
+                            old_from.x1 + delta.x,
+                            old_from.y1 + delta.y,
+                        )
+                        lk_data: Dict[str, Any] = {"kind": lk.get("kind", pymupdf.LINK_URI), "from": new_from}
+                        if lk.get("uri"):
+                            lk_data["uri"] = lk["uri"]
+                        elif lk.get("page") is not None and lk.get("page") >= 0:
+                            lk_data["page"] = lk["page"]
+                        page.insert_link(lk_data)
+                    except Exception:
+                        pass
+            elif encoded_lines is not None and enc_meta:
                 payload = [
                     {
                         "origin": (
@@ -2044,8 +2500,8 @@ def edit_paragraph_block(
                 if fallback_used and not fallback_reason:
                     fallback_reason = "Original font could not encode all characters; standard font substituted."
 
-            # Restore intersecting link annotations
-            if affected_links:
+            # Restore intersecting link annotations (for single-style path)
+            if not use_mixed_runs and affected_links:
                 for lk in affected_links:
                     try:
                         old_from = pymupdf.Rect(lk["from"])
@@ -2098,6 +2554,7 @@ def edit_paragraph_block(
             "font_strategy": method,
             "fallback_used": fallback_used,
             "fallback_reason": fallback_reason if fallback_used or method == "substitute_font" else "",
+            "font_warnings": font_warnings,
             "applied_font": applied_font,
             "final_bbox": disp_target,
             "final_font_size": eff_font_size,

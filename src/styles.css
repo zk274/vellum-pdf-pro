@@ -817,6 +817,89 @@ html,
   box-sizing: border-box;
 }
 
+.inline-paragraph-richtext {
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-y: auto;
+  cursor: text;
+  user-select: text;
+  resize: none;
+}
+
+.rich-fmt-sep {
+  width: 1px;
+  height: 16px;
+  background: var(--border-color);
+  margin: 0 3px;
+}
+
+.rich-fmt-btn {
+  min-width: 24px;
+  height: 22px;
+  padding: 0 5px;
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  background: var(--bg-secondary, rgba(128, 128, 128, 0.1));
+  color: var(--text-primary);
+  font-size: 11px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.rich-fmt-btn.active {
+  background: var(--accent, #2563eb);
+  color: #ffffff;
+  border-color: var(--accent, #2563eb);
+}
+
+.rich-fmt-size {
+  width: 48px;
+  height: 22px;
+  padding: 0 4px;
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  background: var(--bg-secondary, rgba(128, 128, 128, 0.14));
+  color: var(--text-primary);
+  font-size: 11px;
+}
+
+.rich-fmt-color {
+  width: 24px;
+  height: 22px;
+  padding: 1px;
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  background: transparent;
+  cursor: pointer;
+}
+
+.rich-fmt-font {
+  height: 22px;
+  max-width: 110px;
+  padding: 0 4px;
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  background: var(--bg-secondary, rgba(128, 128, 128, 0.14));
+  color: var(--text-primary);
+  font-size: 11px;
+}
+
+.paragraph-font-warning {
+  background: rgba(59, 130, 246, 0.12);
+  color: #1e40af;
+  border-bottom: 1px solid rgba(59, 130, 246, 0.3);
+  padding: 4px 8px;
+  font-size: 10.5px;
+  line-height: 1.3;
+}
+
+[data-theme='dark'] .paragraph-font-warning {
+  background: rgba(59, 130, 246, 0.2);
+  color: #bfdbfe;
+}
+
 .paragraph-overflow-banner {
   background: #fef3c7;
   color: #92400e;

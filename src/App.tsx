@@ -76,11 +76,22 @@ import {
   PreflightReport,
   SignatureVerificationReport,
   TextBlockObject,
+  TextRun,
   TextSpanObject,
   ThumbnailItem,
   VellumBoxObject,
   VellumShapeObject,
 } from './types';
+import {
+  applyStyleToRange,
+  getDomSelectionOffsets,
+  getSelectionStyle,
+  mapPdfFontToCss,
+  parseDomToRuns,
+  replaceTextPreservingRuns,
+  serializeRunsToDom,
+  setDomSelectionOffsets,
+} from './richTextUtils';
 import vellumAppIcon from './assets/branding/vellum-app-icon.png';
 
 type SubTool =
@@ -127,6 +138,8 @@ interface DraftParagraphState {
   targetBbox: [number, number, number, number];
   expectedOrigText: string;
   text: string;
+  runs: TextRun[];
+  selectionRange: { start: number; end: number };
   font: string;
   originalFont: string;
   size: number;
@@ -340,7 +353,7 @@ export default function App() {
   // Active Acrobat-style Paragraph Editor state
   const [draftParagraph, setDraftParagraph] = useState<DraftParagraphState | null>(null);
   const [isCommittingParagraph, setIsCommittingParagraph] = useState(false);
-  const draftParagraphRef = useRef<HTMLTextAreaElement | null>(null);
+  const draftParagraphRef = useRef<HTMLDivElement | null>(null);
 
   // Active Hyperlink Creation Modal state
   const [linkDraftModal, setLinkDraftModal] = useState<{
@@ -1511,33 +1524,133 @@ export default function App() {
     notify('Text box insertion cancelled.');
   };
 
-  const openParagraphEditorForBlock = useCallback((block: TextBlockObject) => {
-    setSelectedObj(null);
-    setSelectedSpan(null);
-    setDraftTextBox(null);
-    setDraftParagraph({
-      blockId: block.id,
-      origBbox: [...block.bbox] as [number, number, number, number],
-      targetBbox: [...block.bbox] as [number, number, number, number],
-      expectedOrigText: block.text,
-      text: block.reflow_text ?? block.text,
-      font: block.dominant_font || 'helv',
-      originalFont: block.dominant_font || 'helv',
-      size: block.dominant_size || 12,
-      color: block.dominant_color || '#000000',
-      bold: Boolean(block.bold),
-      italic: Boolean(block.italic),
-      align: (block.align as any) || 'left',
-      lineHeight: block.line_height || 1.25,
-      isMixedStyle: Boolean(block.is_mixed_style),
-      hasSubsetFont: Boolean(block.has_subset_font),
-      overflowInfo: null,
-    });
-    setRightOpen(true);
-    setTimeout(() => {
-      draftParagraphRef.current?.focus({ preventScroll: true });
-    }, 50);
-  }, []);
+  const openParagraphEditorForBlock = useCallback(
+    (block: TextBlockObject) => {
+      setSelectedObj(null);
+      setSelectedSpan(null);
+      setDraftTextBox(null);
+      const initialText = block.reflow_text ?? block.text;
+      const initialRuns: TextRun[] =
+        block.runs && block.runs.length > 0
+          ? block.runs.map((r) => ({ ...r }))
+          : [
+              {
+                text: initialText,
+                font: block.dominant_font || 'helv',
+                size: block.dominant_size || 12,
+                color: block.dominant_color || '#000000',
+                bold: Boolean(block.bold),
+                italic: Boolean(block.italic),
+                link_uri: null,
+              },
+            ];
+      const joinedText = initialRuns.map((r) => r.text).join('');
+      setDraftParagraph({
+        blockId: block.id,
+        origBbox: [...block.bbox] as [number, number, number, number],
+        targetBbox: [...block.bbox] as [number, number, number, number],
+        expectedOrigText: block.text,
+        text: joinedText,
+        runs: initialRuns,
+        selectionRange: { start: 0, end: 0 },
+        font: block.dominant_font || 'helv',
+        originalFont: block.dominant_font || 'helv',
+        size: block.dominant_size || 12,
+        color: block.dominant_color || '#000000',
+        bold: Boolean(block.bold),
+        italic: Boolean(block.italic),
+        align: (block.align as any) || 'left',
+        lineHeight: block.line_height || 1.25,
+        isMixedStyle: Boolean(block.is_mixed_style) || initialRuns.length > 1,
+        hasSubsetFont: Boolean(block.has_subset_font),
+        overflowInfo: null,
+      });
+      setRightOpen(true);
+      setTimeout(() => {
+        const el = draftParagraphRef.current;
+        if (el) {
+          serializeRunsToDom(el, initialRuns, zoom);
+          el.focus({ preventScroll: true });
+        }
+      }, 40);
+    },
+    [zoom]
+  );
+
+  // Re-render rich spans cleanly if zoom changes while inline editor is open
+  useEffect(() => {
+    const el = draftParagraphRef.current;
+    if (!draftParagraph || !el) return;
+    const prevSel = getDomSelectionOffsets(el);
+    serializeRunsToDom(el, draftParagraph.runs, zoom);
+    if (document.activeElement === el) {
+      setDomSelectionOffsets(el, prevSel.start, prevSel.end);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [zoom]);
+
+  const applyParagraphStylePatch = useCallback(
+    (patch: Partial<Pick<TextRun, 'font' | 'size' | 'color' | 'bold' | 'italic'>>) => {
+      setDraftParagraph((prev) => {
+        if (!prev) return null;
+        const el = draftParagraphRef.current;
+        const liveRange =
+          el && document.activeElement === el ? getDomSelectionOffsets(el) : prev.selectionRange;
+        const hasSelection = liveRange.end > liveRange.start;
+        const nextRuns = hasSelection
+          ? applyStyleToRange(prev.runs, liveRange.start, liveRange.end, patch)
+          : prev.runs.map((r) => ({ ...r, ...patch }));
+        const nextMixed = prev.isMixedStyle || nextRuns.length > 1;
+        if (el) {
+          serializeRunsToDom(el, nextRuns, zoom);
+          el.focus({ preventScroll: true });
+          setDomSelectionOffsets(el, liveRange.start, liveRange.end);
+        }
+        return {
+          ...prev,
+          runs: nextRuns,
+          selectionRange: liveRange,
+          font: !hasSelection && patch.font !== undefined ? patch.font : prev.font,
+          size: !hasSelection && patch.size !== undefined ? patch.size : prev.size,
+          color: !hasSelection && patch.color !== undefined ? patch.color : prev.color,
+          bold: !hasSelection && patch.bold !== undefined ? patch.bold : prev.bold,
+          italic: !hasSelection && patch.italic !== undefined ? patch.italic : prev.italic,
+          isMixedStyle: nextMixed,
+          overflowInfo: null,
+        };
+      });
+    },
+    [zoom]
+  );
+
+  const handleParagraphInspectorTextChange = useCallback(
+    (newText: string) => {
+      setDraftParagraph((prev) => {
+        if (!prev) return null;
+        const fallbackRun: TextRun = {
+          text: '',
+          font: prev.font,
+          size: prev.size,
+          color: prev.color,
+          bold: prev.bold,
+          italic: prev.italic,
+          link_uri: null,
+        };
+        const nextRuns = replaceTextPreservingRuns(prev.runs, newText, fallbackRun);
+        const el = draftParagraphRef.current;
+        if (el) {
+          serializeRunsToDom(el, nextRuns, zoom);
+        }
+        return {
+          ...prev,
+          text: newText,
+          runs: nextRuns,
+          overflowInfo: null,
+        };
+      });
+    },
+    [zoom]
+  );
 
   const openParagraphEditorForSpan = useCallback(
     (span: TextSpanObject) => {
@@ -1608,6 +1721,7 @@ export default function App() {
         line_height: draftParagraph.lineHeight,
         keep_original_font: draftParagraph.font === draftParagraph.originalFont,
         overflow_policy: overflowPolicy,
+        runs: draftParagraph.runs,
       });
 
       if (res.status === 'overflow') {
@@ -1621,7 +1735,11 @@ export default function App() {
       setDraftParagraph(null);
       await refreshDocState(activeDoc.doc_id, currentPage, res.summary);
       if (res.fallback_used && res.fallback_reason) {
-        notify(`Paragraph updated (${res.fallback_reason})`, 'warn');
+        const fbDetail =
+          res.font_warnings && res.font_warnings.length > 0
+            ? `${res.font_warnings[0].original_font} → ${res.font_warnings[0].fallback_font}: ${res.font_warnings[0].reason}`
+            : res.fallback_reason;
+        notify(`Paragraph updated with font fallback (${fbDetail})`, 'warn');
       } else {
         notify(`Paragraph reflowed (${res.wrapped_line_count || 1} lines).`);
       }
@@ -3654,7 +3772,22 @@ export default function App() {
                   ))}
 
                 {/* Active Acrobat-Style Inline Paragraph Editor Overlay */}
-                {draftParagraph && (
+                {draftParagraph && (() => {
+                  const fallbackRun: TextRun = {
+                    text: '',
+                    font: draftParagraph.font,
+                    size: draftParagraph.size,
+                    color: draftParagraph.color,
+                    bold: draftParagraph.bold,
+                    italic: draftParagraph.italic,
+                  };
+                  const selStyle = getSelectionStyle(
+                    draftParagraph.runs,
+                    draftParagraph.selectionRange.start,
+                    draftParagraph.selectionRange.end,
+                    fallbackRun
+                  );
+                  return (
                   <div
                     className={`inline-paragraph-overlay ${isLightHexColor(draftParagraph.color) ? 'dark-paper' : 'light-paper'}`}
                     style={{
@@ -3669,13 +3802,14 @@ export default function App() {
                   >
                     <div
                       className={`inline-textbox-toolbar inline-paragraph-floating-toolbar ${
-                        draftParagraph.targetBbox[1] * zoom < 40 ? 'place-below' : 'place-above'
+                        draftParagraph.targetBbox[1] * zoom < 44 ? 'place-below' : 'place-above'
                       }`}
                     >
                       <button
                         type="button"
                         className="mini-btn apply"
                         disabled={isCommittingParagraph}
+                        onMouseDown={(e) => e.preventDefault()}
                         onClick={() => handleCommitDraftParagraph('check')}
                         title="Save & Reflow Paragraph (Ctrl+Enter)"
                       >
@@ -3685,16 +3819,73 @@ export default function App() {
                         type="button"
                         className="mini-btn cancel"
                         disabled={isCommittingParagraph}
+                        onMouseDown={(e) => e.preventDefault()}
                         onClick={handleCancelDraftParagraph}
                         title="Cancel (Esc)"
                       >
                         <X size={12} /> Cancel
                       </button>
+                      <span className="rich-fmt-sep" />
+                      <button
+                        type="button"
+                        className={`rich-fmt-btn ${selStyle.bold ? 'active' : ''}`}
+                        title="Bold selection (Ctrl+B)"
+                        onMouseDown={(e) => e.preventDefault()}
+                        onClick={() => applyParagraphStylePatch({ bold: !selStyle.bold })}
+                      >
+                        <strong>B</strong>
+                      </button>
+                      <button
+                        type="button"
+                        className={`rich-fmt-btn ${selStyle.italic ? 'active' : ''}`}
+                        title="Italic selection (Ctrl+I)"
+                        onMouseDown={(e) => e.preventDefault()}
+                        onClick={() => applyParagraphStylePatch({ italic: !selStyle.italic })}
+                      >
+                        <em>I</em>
+                      </button>
+                      <input
+                        type="number"
+                        className="rich-fmt-size"
+                        title="Font size (pt)"
+                        min={6}
+                        max={96}
+                        step={0.5}
+                        value={selStyle.size}
+                        onChange={(e) =>
+                          applyParagraphStylePatch({ size: Math.max(6, Number(e.target.value) || 12) })
+                        }
+                      />
+                      <input
+                        type="color"
+                        className="rich-fmt-color"
+                        title="Text color"
+                        value={selStyle.color}
+                        onChange={(e) => applyParagraphStylePatch({ color: e.target.value })}
+                      />
+                      <select
+                        className="rich-fmt-font"
+                        title="Font family"
+                        value={selStyle.font}
+                        onChange={(e) => applyParagraphStylePatch({ font: e.target.value })}
+                      >
+                        <option value={draftParagraph.originalFont}>{draftParagraph.originalFont}</option>
+                        <option value="helv">Helvetica</option>
+                        <option value="tiro">Times</option>
+                        <option value="cour">Courier</option>
+                        <option value="dejavu">DejaVu Sans</option>
+                      </select>
                       <span className="mini-hint">
                         {Math.round(draftParagraph.targetBbox[2] - draftParagraph.targetBbox[0])} ×{' '}
-                        {Math.round(draftParagraph.targetBbox[3] - draftParagraph.targetBbox[1])} pt · Ctrl+Enter to save
+                        {Math.round(draftParagraph.targetBbox[3] - draftParagraph.targetBbox[1])} pt · Ctrl+Enter
                       </span>
                     </div>
+
+                    {draftParagraph.hasSubsetFont && (
+                      <div className="paragraph-font-warning">
+                        Embedded/subset font ({draftParagraph.originalFont}) detected — unencoded glyphs will use fallback font with warning.
+                      </div>
+                    )}
 
                     {draftParagraph.overflowInfo && (
                       <div className="paragraph-overflow-banner">
@@ -3740,16 +3931,49 @@ export default function App() {
                       </div>
                     )}
 
-                    <textarea
+                    <div
                       ref={draftParagraphRef}
-                      className="inline-paragraph-input"
-                      value={draftParagraph.text}
-                      placeholder="Edit paragraph text..."
-                      onChange={(e) =>
+                      className="inline-paragraph-input inline-paragraph-richtext"
+                      contentEditable
+                      suppressContentEditableWarning
+                      spellCheck={false}
+                      role="textbox"
+                      aria-multiline="true"
+                      aria-label="Rich inline paragraph editor"
+                      onInput={(e) => {
+                        const el = e.currentTarget;
+                        const nextRuns = parseDomToRuns(el, fallbackRun);
+                        const nextText = nextRuns.map((r) => r.text).join('');
+                        const sel = getDomSelectionOffsets(el);
                         setDraftParagraph((prev) =>
-                          prev ? { ...prev, text: e.target.value, overflowInfo: null } : null
-                        )
-                      }
+                          prev
+                            ? {
+                                ...prev,
+                                text: nextText,
+                                runs: nextRuns,
+                                selectionRange: sel,
+                                overflowInfo: null,
+                              }
+                            : null
+                        );
+                      }}
+                      onKeyUp={(e) => {
+                        const sel = getDomSelectionOffsets(e.currentTarget);
+                        setDraftParagraph((prev) =>
+                          prev ? { ...prev, selectionRange: sel } : null
+                        );
+                      }}
+                      onMouseUp={(e) => {
+                        const sel = getDomSelectionOffsets(e.currentTarget);
+                        setDraftParagraph((prev) =>
+                          prev ? { ...prev, selectionRange: sel } : null
+                        );
+                      }}
+                      onPaste={(e) => {
+                        e.preventDefault();
+                        const plain = e.clipboardData.getData('text/plain');
+                        document.execCommand('insertText', false, plain);
+                      }}
                       onKeyDown={(e) => {
                         if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
                           e.preventDefault();
@@ -3757,26 +3981,26 @@ export default function App() {
                         } else if (e.key === 'Escape') {
                           e.preventDefault();
                           handleCancelDraftParagraph();
+                        } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'b') {
+                          e.preventDefault();
+                          applyParagraphStylePatch({ bold: !selStyle.bold });
+                        } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'i') {
+                          e.preventDefault();
+                          applyParagraphStylePatch({ italic: !selStyle.italic });
                         }
                       }}
                       style={{
-                        fontFamily: draftParagraph.font.toLowerCase().includes('times') || draftParagraph.font === 'tiro'
-                          ? 'serif'
-                          : draftParagraph.font.toLowerCase().includes('cour') || draftParagraph.font === 'cour'
-                          ? 'monospace'
-                          : 'sans-serif',
+                        fontFamily: mapPdfFontToCss(draftParagraph.font),
                         fontSize: `${Math.max(9, draftParagraph.size * zoom)}px`,
                         lineHeight: draftParagraph.lineHeight,
                         color: draftParagraph.color,
-                        fontWeight: draftParagraph.bold ? 700 : 400,
-                        fontStyle: draftParagraph.italic ? 'italic' : 'normal',
                         textAlign: draftParagraph.align,
                         minHeight: `${Math.max(24, (draftParagraph.targetBbox[3] - draftParagraph.targetBbox[1]) * zoom)}px`,
                       }}
-                      autoFocus
                     />
                   </div>
-                )}
+                  );
+                })()}
 
                 {/* Unified Object Selection Frame with 8 Resize Handles */}
                 {mode === 'edit' && subTool === 'select' && selectedObj && !draftTextBox && !draftParagraph && (
@@ -4140,7 +4364,24 @@ export default function App() {
               )}
 
               {/* ACROBAT-STYLE PARAGRAPH EDITOR INSPECTOR */}
-              {draftParagraph && (
+              {draftParagraph && (() => {
+                const fallbackRun: TextRun = {
+                  text: '',
+                  font: draftParagraph.font,
+                  size: draftParagraph.size,
+                  color: draftParagraph.color,
+                  bold: draftParagraph.bold,
+                  italic: draftParagraph.italic,
+                };
+                const selStyle = getSelectionStyle(
+                  draftParagraph.runs,
+                  draftParagraph.selectionRange.start,
+                  draftParagraph.selectionRange.end,
+                  fallbackRun
+                );
+                const hasSelection =
+                  draftParagraph.selectionRange.end > draftParagraph.selectionRange.start;
+                return (
                 <div className="inspector-section">
                   <h4>
                     <FileText size={14} /> Paragraph Editor & Reflow
@@ -4148,30 +4389,27 @@ export default function App() {
                   <p className="hint-text">
                     Original font: <strong>{draftParagraph.originalFont}</strong>
                     {draftParagraph.hasSubsetFont ? ' (subset)' : ''}
-                    {draftParagraph.isMixedStyle ? ' · mixed inline styles' : ''}
+                    {draftParagraph.runs.length > 1 || draftParagraph.isMixedStyle ? ' · mixed inline styles' : ''}
                   </p>
+                  {hasSelection && (
+                    <p className="hint-text" style={{ color: 'var(--accent, #2563eb)', fontWeight: 500 }}>
+                      Selection ({draftParagraph.selectionRange.end - draftParagraph.selectionRange.start} chars) — styling applies only to selection
+                    </p>
+                  )}
                   <div className="form-group">
                     <label>Paragraph Text (Reflows inside width)</label>
                     <textarea
                       rows={5}
                       value={draftParagraph.text}
-                      onChange={(e) =>
-                        setDraftParagraph((prev) =>
-                          prev ? { ...prev, text: e.target.value, overflowInfo: null } : null
-                        )
-                      }
+                      onChange={(e) => handleParagraphInspectorTextChange(e.target.value)}
                     />
                   </div>
                   <div className="form-row">
                     <div className="form-group">
                       <label>Font Family</label>
                       <select
-                        value={draftParagraph.font}
-                        onChange={(e) =>
-                          setDraftParagraph((prev) =>
-                            prev ? { ...prev, font: e.target.value, overflowInfo: null } : null
-                          )
-                        }
+                        value={selStyle.font}
+                        onChange={(e) => applyParagraphStylePatch({ font: e.target.value })}
                       >
                         <option value={draftParagraph.originalFont}>
                           Original ({draftParagraph.originalFont})
@@ -4189,11 +4427,9 @@ export default function App() {
                         step="0.5"
                         min="6"
                         max="144"
-                        value={draftParagraph.size}
+                        value={selStyle.size}
                         onChange={(e) =>
-                          setDraftParagraph((prev) =>
-                            prev ? { ...prev, size: Number(e.target.value), overflowInfo: null } : null
-                          )
+                          applyParagraphStylePatch({ size: Math.max(6, Number(e.target.value) || 12) })
                         }
                       />
                     </div>
@@ -4203,10 +4439,8 @@ export default function App() {
                       <label>Color</label>
                       <input
                         type="color"
-                        value={draftParagraph.color}
-                        onChange={(e) =>
-                          setDraftParagraph((prev) => (prev ? { ...prev, color: e.target.value } : null))
-                        }
+                        value={selStyle.color}
+                        onChange={(e) => applyParagraphStylePatch({ color: e.target.value })}
                         style={{ height: 30, width: '100%' }}
                       />
                     </div>
@@ -4272,24 +4506,16 @@ export default function App() {
                     <label style={{ display: 'flex', alignItems: 'center', gap: 5, fontSize: 12 }}>
                       <input
                         type="checkbox"
-                        checked={draftParagraph.bold}
-                        onChange={(e) =>
-                          setDraftParagraph((prev) =>
-                            prev ? { ...prev, bold: e.target.checked, overflowInfo: null } : null
-                          )
-                        }
+                        checked={selStyle.bold}
+                        onChange={(e) => applyParagraphStylePatch({ bold: e.target.checked })}
                       />
                       Bold
                     </label>
                     <label style={{ display: 'flex', alignItems: 'center', gap: 5, fontSize: 12 }}>
                       <input
                         type="checkbox"
-                        checked={draftParagraph.italic}
-                        onChange={(e) =>
-                          setDraftParagraph((prev) =>
-                            prev ? { ...prev, italic: e.target.checked, overflowInfo: null } : null
-                          )
-                        }
+                        checked={selStyle.italic}
+                        onChange={(e) => applyParagraphStylePatch({ italic: e.target.checked })}
                       />
                       Italic
                     </label>
@@ -4307,7 +4533,8 @@ export default function App() {
                     </button>
                   </div>
                 </div>
-              )}
+                );
+              })()}
 
               {/* UNIFIED OBJECT SELECTION & TRANSFORM INSPECTOR */}
               {selectedObj && !draftTextBox && !draftParagraph && (
