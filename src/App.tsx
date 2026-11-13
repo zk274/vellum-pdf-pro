@@ -339,6 +339,7 @@ export default function App() {
 
   // Active Acrobat-style Paragraph Editor state
   const [draftParagraph, setDraftParagraph] = useState<DraftParagraphState | null>(null);
+  const [isCommittingParagraph, setIsCommittingParagraph] = useState(false);
   const draftParagraphRef = useRef<HTMLTextAreaElement | null>(null);
 
   // Active Hyperlink Creation Modal state
@@ -1534,7 +1535,7 @@ export default function App() {
     });
     setRightOpen(true);
     setTimeout(() => {
-      draftParagraphRef.current?.focus();
+      draftParagraphRef.current?.focus({ preventScroll: true });
     }, 50);
   }, []);
 
@@ -1576,10 +1577,21 @@ export default function App() {
     [pageObjects, openParagraphEditorForBlock]
   );
 
+  const isLightHexColor = (hex: string): boolean => {
+    const clean = (hex || '#000000').replace('#', '');
+    if (clean.length !== 6) return false;
+    const r = parseInt(clean.slice(0, 2), 16);
+    const g = parseInt(clean.slice(2, 4), 16);
+    const b = parseInt(clean.slice(4, 6), 16);
+    if (Number.isNaN(r) || Number.isNaN(g) || Number.isNaN(b)) return false;
+    return (0.299 * r + 0.587 * g + 0.114 * b) / 255 > 0.72;
+  };
+
   const handleCommitDraftParagraph = async (
     overflowPolicy: 'check' | 'expand_box' | 'shrink_font' | 'force' = 'check'
   ) => {
-    if (!activeDoc || !draftParagraph) return;
+    if (!activeDoc || !draftParagraph || isCommittingParagraph) return;
+    setIsCommittingParagraph(true);
     try {
       const res = await pdfApi.editParagraph(activeDoc.doc_id, currentPage, {
         block_id: draftParagraph.blockId,
@@ -1615,6 +1627,8 @@ export default function App() {
       }
     } catch (err: any) {
       notify(`Paragraph edit failed safely: ${err?.message || err}`, 'warn');
+    } finally {
+      setIsCommittingParagraph(false);
     }
   };
 
@@ -3373,6 +3387,9 @@ export default function App() {
                         e.stopPropagation();
                         selectManipulableObject('shape', shape.id, shape.bbox, shape);
                       }}
+                      onDoubleClick={(e) => {
+                        e.stopPropagation();
+                      }}
                       onContextMenu={(e) => {
                         e.preventDefault();
                         e.stopPropagation();
@@ -3429,6 +3446,9 @@ export default function App() {
                       onClick={(e) => {
                         e.stopPropagation();
                         selectManipulableObject('image', im.id, im.bbox, im);
+                      }}
+                      onDoubleClick={(e) => {
+                        e.stopPropagation();
                       }}
                       onContextMenu={(e) => {
                         e.preventDefault();
@@ -3636,28 +3656,35 @@ export default function App() {
                 {/* Active Acrobat-Style Inline Paragraph Editor Overlay */}
                 {draftParagraph && (
                   <div
-                    className="inline-paragraph-overlay"
+                    className={`inline-paragraph-overlay ${isLightHexColor(draftParagraph.color) ? 'dark-paper' : 'light-paper'}`}
                     style={{
                       left: `${draftParagraph.targetBbox[0] * zoom}px`,
                       top: `${draftParagraph.targetBbox[1] * zoom}px`,
                       width: `${Math.max(140, (draftParagraph.targetBbox[2] - draftParagraph.targetBbox[0]) * zoom)}px`,
-                      minHeight: `${Math.max(44, (draftParagraph.targetBbox[3] - draftParagraph.targetBbox[1]) * zoom)}px`,
+                      minHeight: `${Math.max(24, (draftParagraph.targetBbox[3] - draftParagraph.targetBbox[1]) * zoom)}px`,
                     }}
                     onClick={(e) => e.stopPropagation()}
                     onMouseDown={(e) => e.stopPropagation()}
+                    onDoubleClick={(e) => e.stopPropagation()}
                   >
-                    <div className="inline-textbox-toolbar">
+                    <div
+                      className={`inline-textbox-toolbar inline-paragraph-floating-toolbar ${
+                        draftParagraph.targetBbox[1] * zoom < 40 ? 'place-below' : 'place-above'
+                      }`}
+                    >
                       <button
                         type="button"
                         className="mini-btn apply"
+                        disabled={isCommittingParagraph}
                         onClick={() => handleCommitDraftParagraph('check')}
-                        title="Apply & Reflow Paragraph (Ctrl+Enter)"
+                        title="Save & Reflow Paragraph (Ctrl+Enter)"
                       >
-                        <Check size={12} /> Apply
+                        <Check size={12} /> {isCommittingParagraph ? 'Saving...' : 'Save'}
                       </button>
                       <button
                         type="button"
                         className="mini-btn cancel"
+                        disabled={isCommittingParagraph}
                         onClick={handleCancelDraftParagraph}
                         title="Cancel (Esc)"
                       >
@@ -3665,7 +3692,7 @@ export default function App() {
                       </button>
                       <span className="mini-hint">
                         {Math.round(draftParagraph.targetBbox[2] - draftParagraph.targetBbox[0])} ×{' '}
-                        {Math.round(draftParagraph.targetBbox[3] - draftParagraph.targetBbox[1])} pt · Ctrl+Enter to apply
+                        {Math.round(draftParagraph.targetBbox[3] - draftParagraph.targetBbox[1])} pt · Ctrl+Enter to save
                       </span>
                     </div>
 
@@ -3744,7 +3771,7 @@ export default function App() {
                         fontWeight: draftParagraph.bold ? 700 : 400,
                         fontStyle: draftParagraph.italic ? 'italic' : 'normal',
                         textAlign: draftParagraph.align,
-                        minHeight: `${Math.max(36, (draftParagraph.targetBbox[3] - draftParagraph.targetBbox[1]) * zoom)}px`,
+                        minHeight: `${Math.max(24, (draftParagraph.targetBbox[3] - draftParagraph.targetBbox[1]) * zoom)}px`,
                       }}
                       autoFocus
                     />
@@ -3772,12 +3799,18 @@ export default function App() {
                       className="object-selection-body"
                       onMouseDown={handleStartDragMove}
                       onDoubleClick={(e) => {
+                        e.stopPropagation();
                         if (selectedObj.objectType === 'textbox') {
-                          e.stopPropagation();
                           handleStartEditText(selectedObj.data);
+                        } else if (selectedObj.objectType === 'text_span') {
+                          openParagraphEditorForSpan(selectedObj.data);
                         }
                       }}
-                      title="Drag to move object · Arrow keys to nudge (Shift: 10pt) · Del to remove"
+                      title={
+                        selectedObj.objectType === 'text_span' || selectedObj.objectType === 'textbox'
+                          ? 'Drag to move · Double-click to edit inline · Arrow keys to nudge · Del to remove'
+                          : 'Drag to move object · Arrow keys to nudge (Shift: 10pt) · Del to remove'
+                      }
                     />
                     <div className="selection-dimension-badge">
                       <span>
@@ -3788,14 +3821,14 @@ export default function App() {
                         (X: {Math.round(selectedObj.currentBbox[0])}, Y: {Math.round(selectedObj.currentBbox[1])})
                       </span>
                     </div>
-                    <div className="resize-handle handle-nw" onMouseDown={(e) => handleStartResize(e, 'nw')} />
-                    <div className="resize-handle handle-n" onMouseDown={(e) => handleStartResize(e, 'n')} />
-                    <div className="resize-handle handle-ne" onMouseDown={(e) => handleStartResize(e, 'ne')} />
-                    <div className="resize-handle handle-e" onMouseDown={(e) => handleStartResize(e, 'e')} />
-                    <div className="resize-handle handle-se" onMouseDown={(e) => handleStartResize(e, 'se')} />
-                    <div className="resize-handle handle-s" onMouseDown={(e) => handleStartResize(e, 's')} />
-                    <div className="resize-handle handle-sw" onMouseDown={(e) => handleStartResize(e, 'sw')} />
-                    <div className="resize-handle handle-w" onMouseDown={(e) => handleStartResize(e, 'w')} />
+                    <div className="resize-handle handle-nw" onMouseDown={(e) => handleStartResize(e, 'nw')} onDoubleClick={(e) => e.stopPropagation()} />
+                    <div className="resize-handle handle-n" onMouseDown={(e) => handleStartResize(e, 'n')} onDoubleClick={(e) => e.stopPropagation()} />
+                    <div className="resize-handle handle-ne" onMouseDown={(e) => handleStartResize(e, 'ne')} onDoubleClick={(e) => e.stopPropagation()} />
+                    <div className="resize-handle handle-e" onMouseDown={(e) => handleStartResize(e, 'e')} onDoubleClick={(e) => e.stopPropagation()} />
+                    <div className="resize-handle handle-se" onMouseDown={(e) => handleStartResize(e, 'se')} onDoubleClick={(e) => e.stopPropagation()} />
+                    <div className="resize-handle handle-s" onMouseDown={(e) => handleStartResize(e, 's')} onDoubleClick={(e) => e.stopPropagation()} />
+                    <div className="resize-handle handle-sw" onMouseDown={(e) => handleStartResize(e, 'sw')} onDoubleClick={(e) => e.stopPropagation()} />
+                    <div className="resize-handle handle-w" onMouseDown={(e) => handleStartResize(e, 'w')} onDoubleClick={(e) => e.stopPropagation()} />
                   </div>
                 )}
 

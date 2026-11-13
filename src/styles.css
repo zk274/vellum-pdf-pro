@@ -771,6 +771,7 @@ html,
   position: absolute;
   border: 2px solid #2563eb;
   background: rgba(255, 255, 255, 0.97);
+  color: #0f172a;
   box-shadow: 0 8px 28px rgba(0, 0, 0, 0.35);
   border-radius: 4px;
   z-index: 65;
@@ -779,10 +780,28 @@ html,
   overflow: visible;
 }
 
-[data-theme='dark'] .inline-paragraph-overlay {
-  background: rgba(15, 23, 42, 0.97);
-  border-color: #3b82f6;
-  color: #f1f5f9;
+.inline-paragraph-overlay.dark-paper {
+  background: rgba(15, 23, 42, 0.96);
+  border-color: #60a5fa;
+  color: #f8fafc;
+}
+
+.inline-paragraph-floating-toolbar {
+  position: absolute;
+  left: -2px;
+  min-width: max-content;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25);
+  z-index: 70;
+}
+
+.inline-paragraph-floating-toolbar.place-above {
+  bottom: calc(100% + 6px);
+}
+
+.inline-paragraph-floating-toolbar.place-below {
+  top: calc(100% + 6px);
 }
 
 .inline-paragraph-input {
@@ -791,7 +810,7 @@ html,
   border: none;
   outline: none;
   resize: vertical;
-  padding: 5px 7px;
+  padding: 2px 4px;
   background: transparent;
   color: inherit;
   font-family: inherit;
