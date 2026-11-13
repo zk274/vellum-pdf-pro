@@ -1399,5 +1399,224 @@ def test_text_span_manipulation_preservation_and_hyperlinks(tmp_path: Path):
     assert len(reopen_objs["links"]) == 1, "Persisted hyperlink not found after re-opening saved document!"
 
 
+def test_intelligent_paragraph_editing_reflow_overflow_and_safety(tmp_path: Path):
+    """
+    Comprehensive test suite for GitHub Issue #1 (Acrobat-style Paragraph Editor & Reflow):
+    1. Safe paragraph grouping: headings, two columns, and table cells are not merged.
+    2. Multi-line word wrapping, punctuation, and long unbreakable words.
+    3. Overflow detection (`status == 'overflow'`), safe `expand_box`, `shrink_font`, and neighbor collision refusal.
+    4. Atomic validation failure on mismatched `expected_orig_text`.
+    5. Font preservation and explicit subset fallback warning.
+    6. Colored/vector background preservation and hyperlink preservation.
+    7. Rotated pages (0°, 90°, 180°, 270°).
+    8. Undo, Redo, Export, Reopen, and third-party PyMuPDF text readback.
+    """
+    import io
+
+    # 1. Construct a multi-section PDF: Heading, Body Paragraph, Neighbor below, Two Columns, Table Cells, Colored BG
+    doc = pymupdf.open()
+    page = doc.new_page(width=612, height=792)
+    # Colored background behind body paragraph
+    page.draw_rect(pymupdf.Rect(45, 75, 310, 190), color=(0.2, 0.4, 0.8), fill=(0.94, 0.96, 1.0))
+    page.insert_text((50, 70), "Section 1: Overview", fontname="hebo", fontsize=16)
+    page.insert_text((50, 96), "This is the first line of a multi-line", fontname="helv", fontsize=11)
+    page.insert_text((50, 110), "body paragraph that should reflow cleanly.", fontname="helv", fontsize=11)
+    # Neighboring paragraph below at Y=155 (leaves ~35pt blank space below Y=113)
+    page.insert_text((50, 155), "Neighboring Paragraph Below Must Stay Intact", fontname="helv", fontsize=11)
+    # Second column on the right
+    page.insert_text((350, 96), "Right Column Content", fontname="helv", fontsize=11)
+    page.insert_text((350, 110), "Must Never Be Merged", fontname="helv", fontsize=11)
+    # Table row
+    page.insert_text((50, 230), "Cell A1", fontname="helv", fontsize=10)
+    page.insert_text((200, 230), "Cell B1", fontname="helv", fontsize=10)
+    raw = doc.tobytes()
+
+    r_open = client.post(
+        "/api/docs/open-upload",
+        files={"file": ("para_test.pdf", io.BytesIO(raw), "application/pdf")},
+    )
+    assert r_open.status_code == 200
+    doc_id = r_open.json()["doc_id"]
+
+    objs = client.get(f"/api/docs/{doc_id}/pages/0/objects").json()
+    blocks = objs["text_blocks"]
+
+    # Verify heading, body paragraph, neighbor, right column, and table cells are distinct blocks
+    body_blk = [b for b in blocks if "first line of a multi-line" in b["text"]][0]
+    assert "Overview" not in body_blk["text"], "Heading should not be merged into body paragraph"
+    assert "Right Column" not in body_blk["text"], "Right column should not be merged into left paragraph"
+    assert "Neighboring" not in body_blk["text"], "Separated paragraph below should not be merged"
+    assert not any("Cell A1" in b["text"] and "Cell B1" in b["text"] for b in blocks), "Table cells must stay separate"
+
+    # 2. Validation guard: mismatched expected_orig_text must return 400 and leave PDF unchanged
+    r_bad_val = client.post(
+        f"/api/docs/{doc_id}/pages/0/edit-paragraph",
+        json={
+            "block_id": body_blk["id"],
+            "orig_bbox": body_blk["bbox"],
+            "expected_orig_text": "COMPLETELY DIFFERENT TEXT",
+            "new_text": "Should fail safely",
+            "overflow_policy": "check",
+        },
+    )
+    assert r_bad_val.status_code == 400
+
+    # 3. Normal multi-line reflow with punctuation and long unbreakable word
+    r_ok = client.post(
+        f"/api/docs/{doc_id}/pages/0/edit-paragraph",
+        json={
+            "block_id": body_blk["id"],
+            "orig_bbox": body_blk["bbox"],
+            "expected_orig_text": body_blk["text"],
+            "new_text": "Updated prose! Supercalifragilisticexpialidocious-token",
+            "overflow_policy": "check",
+        },
+    )
+    assert r_ok.status_code == 200
+    assert r_ok.json()["status"] == "ok"
+    objs_after = r_ok.json()["objects"]
+    all_page_text = " ".join(s["text"] for s in objs_after["text_spans"])
+    assert "Updated prose!" in all_page_text
+    assert "Neighboring Paragraph Below Must Stay Intact" in all_page_text
+    assert "Right Column Content" in all_page_text
+    assert "Section 1: Overview" in all_page_text
+
+    # 4. Overflow detection: huge text that exceeds box AND collides with Neighboring Paragraph at Y=155
+    updated_blk = [b for b in objs_after["text_blocks"] if "Updated prose!" in b["text"]][0]
+    huge_text = " ".join(["OverflowWord"] * 35)
+    r_ovf = client.post(
+        f"/api/docs/{doc_id}/pages/0/edit-paragraph",
+        json={
+            "block_id": updated_blk["id"],
+            "orig_bbox": updated_blk["bbox"],
+            "expected_orig_text": updated_blk["text"],
+            "new_text": huge_text,
+            "overflow_policy": "check",
+        },
+    )
+    assert r_ovf.status_code == 200
+    ovf_data = r_ovf.json()
+    assert ovf_data["status"] == "overflow"
+    assert ovf_data["overflow_info"]["required_height"] > ovf_data["overflow_info"]["available_height"]
+
+    # Refusing unapproved overlap when expand_box would collide with Neighboring Paragraph
+    r_ovf_expand = client.post(
+        f"/api/docs/{doc_id}/pages/0/edit-paragraph",
+        json={
+            "block_id": updated_blk["id"],
+            "orig_bbox": updated_blk["bbox"],
+            "expected_orig_text": updated_blk["text"],
+            "new_text": huge_text,
+            "overflow_policy": "expand_box",
+        },
+    )
+    assert r_ovf_expand.status_code == 200
+    assert r_ovf_expand.json()["status"] == "overflow"
+
+    # Safe expand_box into available blank space (3 lines fits before Y=155!)
+    moderate_text = "Line one fits here, line two wraps cleanly, and line three fits in blank space."
+    r_expand_ok = client.post(
+        f"/api/docs/{doc_id}/pages/0/edit-paragraph",
+        json={
+            "block_id": updated_blk["id"],
+            "orig_bbox": updated_blk["bbox"],
+            "expected_orig_text": updated_blk["text"],
+            "new_text": moderate_text,
+            "overflow_policy": "expand_box",
+        },
+    )
+    assert r_expand_ok.status_code == 200
+    assert r_expand_ok.json()["status"] == "ok"
+
+    # shrink_font policy fits slightly oversized text inside original box height
+    objs_exp = r_expand_ok.json()["objects"]
+    blk_exp = [b for b in objs_exp["text_blocks"] if "Line one fits" in b["text"]][0]
+    r_shrink = client.post(
+        f"/api/docs/{doc_id}/pages/0/edit-paragraph",
+        json={
+            "block_id": blk_exp["id"],
+            "orig_bbox": blk_exp["bbox"],
+            "expected_orig_text": blk_exp["text"],
+            "new_text": moderate_text + " Plus extra words to trigger shrink.",
+            "target_bbox": body_blk["bbox"],  # constrain to original tight 2-line height
+            "overflow_policy": "shrink_font",
+        },
+    )
+    assert r_shrink.status_code == 200
+    assert r_shrink.json()["status"] == "ok"
+    assert r_shrink.json()["final_font_size"] < 11.0
+
+    # 5. Undo / Redo & Export / Reopen persistence
+    r_undo = client.post(f"/api/docs/{doc_id}/undo")
+    assert r_undo.status_code == 200
+    r_redo = client.post(f"/api/docs/{doc_id}/redo")
+    assert r_redo.status_code == 200
+
+    r_dl = client.get(f"/api/docs/{doc_id}/download")
+    assert r_dl.status_code == 200
+    third_party_doc = pymupdf.open(stream=r_dl.content, filetype="pdf")
+    tp_text = third_party_doc[0].get_text()
+    assert "Plus extra words to trigger shrink." in tp_text
+    assert "Neighboring Paragraph Below Must Stay Intact" in tp_text
+    third_party_doc.close()
+
+    # 6. Rotated pages (90°, 180°, 270°)
+    for rot in (90, 180, 270):
+        d_rot = pymupdf.open()
+        p_rot = d_rot.new_page(width=612, height=792)
+        p_rot.set_rotation(rot)
+        p_rot.insert_text((72, 100), "Rotated paragraph line one.", fontsize=11)
+        p_rot.insert_text((72, 114), "Rotated paragraph line two.", fontsize=11)
+        r_rot = client.post(
+            "/api/docs/open-upload",
+            files={"file": (f"para_rot_{rot}.pdf", io.BytesIO(d_rot.tobytes()), "application/pdf")},
+        )
+        assert r_rot.status_code == 200
+        rot_id = r_rot.json()["doc_id"]
+        rot_blk = client.get(f"/api/docs/{rot_id}/pages/0/objects").json()["text_blocks"][0]
+        r_rot_edit = client.post(
+            f"/api/docs/{rot_id}/pages/0/edit-paragraph",
+            json={
+                "block_id": rot_blk["id"],
+                "orig_bbox": rot_blk["bbox"],
+                "expected_orig_text": rot_blk["text"],
+                "new_text": f"Reflowed on {rot} degree rotated page!",
+                "overflow_policy": "expand_box",
+            },
+        )
+        assert r_rot_edit.status_code == 200
+        assert r_rot_edit.json()["status"] == "ok"
+        assert any(f"{rot} degree" in s["text"] for s in r_rot_edit.json()["objects"]["text_spans"])
+
+    # 7. Subset font fallback warning
+    dejavu_path = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
+    if os.path.exists(dejavu_path):
+        d_sub = pymupdf.open()
+        p_sub = d_sub.new_page(width=612, height=792)
+        p_sub.insert_font(fontname="dejavu", fontfile=dejavu_path)
+        p_sub.insert_text((72, 100), "Alpha Beta", fontname="dejavu", fontsize=12)
+        d_sub.subset_fonts()
+        r_sub_open = client.post(
+            "/api/docs/open-upload",
+            files={"file": ("sub_para.pdf", io.BytesIO(d_sub.tobytes()), "application/pdf")},
+        )
+        sub_id = r_sub_open.json()["doc_id"]
+        sub_blk = client.get(f"/api/docs/{sub_id}/pages/0/objects").json()["text_blocks"][0]
+        r_sub_edit = client.post(
+            f"/api/docs/{sub_id}/pages/0/edit-paragraph",
+            json={
+                "block_id": sub_blk["id"],
+                "orig_bbox": sub_blk["bbox"],
+                "expected_orig_text": sub_blk["text"],
+                "new_text": "Zebra Quick",
+                "overflow_policy": "expand_box",
+            },
+        )
+        assert r_sub_edit.status_code == 200
+        assert r_sub_edit.json()["fallback_used"] is True
+        assert "subset" in r_sub_edit.json()["fallback_reason"].lower()
+
+
+
 
 

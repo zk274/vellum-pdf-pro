@@ -174,6 +174,223 @@ def _set_page_vellum_data(doc: pymupdf.Document, page: pymupdf.Page, data: Dict[
         pass
 
 
+def _build_paragraph_blocks(page_index: int, text_spans: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Group extracted display-space spans into safe, logical paragraphs.
+
+    Avoids merging separate columns, table cells, headings with body paragraphs,
+    or vertically/horizontally separated lines.
+    """
+    from collections import Counter
+
+    # 1. Group spans by (block_index, line_index) and split wide horizontal gaps (columns/cells)
+    by_line: Dict[Tuple[int, int], List[Dict[str, Any]]] = {}
+    for sp in text_spans:
+        key = (int(sp["block_index"]), int(sp["line_index"]))
+        by_line.setdefault(key, []).append(sp)
+
+    line_segments: List[Dict[str, Any]] = []
+    for (b_idx, l_idx) in sorted(by_line.keys()):
+        spans = sorted(
+            by_line[(b_idx, l_idx)],
+            key=lambda s: (s["bbox"][0], s["bbox"][1]),
+        )
+        current_seg: List[Dict[str, Any]] = []
+        for sp in spans:
+            if not current_seg:
+                current_seg.append(sp)
+                continue
+            prev_sp = current_seg[-1]
+            avg_size = max(8.0, (prev_sp["size"] + sp["size"]) * 0.5)
+            h_gap = sp["bbox"][0] - prev_sp["bbox"][2]
+            # Split into separate table cells / columns when horizontal gap is abnormally wide
+            if prev_sp["horizontal"] and sp["horizontal"] and h_gap > max(18.0, avg_size * 1.9):
+                line_segments.append(_make_line_segment(b_idx, l_idx, current_seg))
+                current_seg = [sp]
+            else:
+                current_seg.append(sp)
+        if current_seg:
+            line_segments.append(_make_line_segment(b_idx, l_idx, current_seg))
+
+    # 2. Group consecutive line segments into logical paragraphs within each block_index
+    paragraphs: List[List[Dict[str, Any]]] = []
+    curr_para: List[Dict[str, Any]] = []
+    for seg in line_segments:
+        if not curr_para:
+            curr_para.append(seg)
+            continue
+        prev = curr_para[-1]
+        if seg["block_index"] != prev["block_index"] or seg["horizontal"] != prev["horizontal"]:
+            paragraphs.append(curr_para)
+            curr_para = [seg]
+            continue
+
+        # Check vertical gap / column jump
+        prev_h = max(6.0, prev["bbox"][3] - prev["bbox"][1])
+        v_gap = seg["bbox"][1] - prev["bbox"][3]
+        # Separate if large vertical gap (> 0.65 * line height) or backwards Y jump (next column)
+        if v_gap > max(7.0, prev_h * 0.65) or v_gap < -prev_h * 0.45:
+            paragraphs.append(curr_para)
+            curr_para = [seg]
+            continue
+
+        # Check horizontal overlap (avoid merging disjoint side-by-side columns/cells)
+        overlap_x = min(prev["bbox"][2], seg["bbox"][2]) - max(prev["bbox"][0], seg["bbox"][0])
+        if overlap_x < -4.0:
+            paragraphs.append(curr_para)
+            curr_para = [seg]
+            continue
+
+        # Check sharp typography transition (heading vs body)
+        size_diff = abs(seg["dom_size"] - prev["dom_size"])
+        if size_diff >= 1.5:
+            paragraphs.append(curr_para)
+            curr_para = [seg]
+            continue
+        if prev["all_bold"] != seg["all_bold"] and len(curr_para) == 1 and len(prev["text"]) < 80:
+            paragraphs.append(curr_para)
+            curr_para = [seg]
+            continue
+
+        curr_para.append(seg)
+
+    if curr_para:
+        paragraphs.append(curr_para)
+
+    # 3. Build rich paragraph descriptors
+    blocks_out: List[Dict[str, Any]] = []
+    for p_idx, segs in enumerate(paragraphs):
+        all_spans = [sp for seg in segs for sp in seg["spans"]]
+        x0 = round(min(seg["bbox"][0] for seg in segs), 2)
+        y0 = round(min(seg["bbox"][1] for seg in segs), 2)
+        x1 = round(max(seg["bbox"][2] for seg in segs), 2)
+        y1 = round(max(seg["bbox"][3] for seg in segs), 2)
+        para_w = max(1.0, x1 - x0)
+
+        # Weighted dominant style
+        font_counts: Counter = Counter()
+        size_counts: Counter = Counter()
+        color_counts: Counter = Counter()
+        bold_chars = 0
+        italic_chars = 0
+        total_chars = 0
+        for sp in all_spans:
+            w = max(1, len(sp["text"].strip()))
+            font_counts[sp["font"]] += w
+            size_counts[sp["size"]] += w
+            color_counts[sp["color"]] += w
+            if sp["bold"]:
+                bold_chars += w
+            if sp["italic"]:
+                italic_chars += w
+            total_chars += w
+
+        dom_font = font_counts.most_common(1)[0][0]
+        dom_size = float(size_counts.most_common(1)[0][0])
+        dom_color = color_counts.most_common(1)[0][0]
+        dom_bold = bold_chars > total_chars * 0.5
+        dom_italic = italic_chars > total_chars * 0.5
+        is_mixed = len(font_counts) > 1 or len(size_counts) > 1 or len(color_counts) > 1 or (0 < bold_chars < total_chars)
+        has_subset = any(bool(sp["is_subset_font"]) for sp in all_spans)
+
+        # Measure actual baseline-to-baseline line height
+        line_height_ratio = 1.25
+        if len(segs) >= 2:
+            deltas = [
+                segs[i]["origin"][1] - segs[i - 1]["origin"][1]
+                for i in range(1, len(segs))
+                if segs[i]["origin"][1] > segs[i - 1]["origin"][1]
+            ]
+            if deltas:
+                avg_dy = sum(deltas) / len(deltas)
+                line_height_ratio = round(min(1.85, max(1.05, avg_dy / max(6.0, dom_size))), 2)
+
+        # Infer horizontal alignment
+        align = "left"
+        if len(segs) >= 2:
+            left_spread = max(s["bbox"][0] for s in segs) - min(s["bbox"][0] for s in segs)
+            right_spread = max(s["bbox"][2] for s in segs) - min(s["bbox"][2] for s in segs)
+            centers = [(s["bbox"][0] + s["bbox"][2]) * 0.5 for s in segs]
+            center_spread = max(centers) - min(centers)
+            if center_spread < 4.0 and left_spread > 6.0 and right_spread > 6.0:
+                align = "center"
+            elif right_spread < 4.0 and left_spread > 8.0:
+                align = "right"
+
+        # Build reflowable prose text alongside exact line-broken text
+        exact_lines = [seg["text"] for seg in segs]
+        reflow_parts: List[str] = []
+        for idx_s, seg in enumerate(segs):
+            txt = seg["text"].strip()
+            if idx_s == 0:
+                reflow_parts.append(txt)
+                continue
+            prev_seg = segs[idx_s - 1]
+            prev_w = prev_seg["bbox"][2] - prev_seg["bbox"][0]
+            prev_txt = prev_seg["text"].rstrip()
+            # Keep hard newline if previous line is noticeably short (< 72% width) or ends with colon
+            if prev_w < para_w * 0.72 or prev_txt.endswith(":"):
+                reflow_parts.append("\n" + txt)
+            elif prev_txt.endswith("-") and len(prev_txt) > 2 and prev_txt[-2].isalpha():
+                reflow_parts[-1] = reflow_parts[-1][:-1] + txt
+            else:
+                reflow_parts.append(" " + txt)
+
+        blocks_out.append(
+            {
+                "id": f"para_{page_index}_{segs[0]['block_index']}_{p_idx}",
+                "block_index": segs[0]["block_index"],
+                "bbox": [x0, y0, x1, y1],
+                "text": "\n".join(exact_lines),
+                "reflow_text": "".join(reflow_parts),
+                "span_ids": [sp["id"] for sp in all_spans],
+                "line_bboxes": [seg["bbox"] for seg in segs],
+                "first_origin": segs[0]["origin"],
+                "dominant_font": dom_font,
+                "dominant_size": dom_size,
+                "dominant_color": dom_color,
+                "bold": dom_bold,
+                "italic": dom_italic,
+                "line_height": line_height_ratio,
+                "align": align,
+                "is_mixed_style": is_mixed,
+                "has_subset_font": has_subset,
+                "horizontal": segs[0]["horizontal"],
+            }
+        )
+    return blocks_out
+
+
+def _make_line_segment(b_idx: int, l_idx: int, spans: List[Dict[str, Any]]) -> Dict[str, Any]:
+    from collections import Counter
+
+    x0 = min(s["bbox"][0] for s in spans)
+    y0 = min(s["bbox"][1] for s in spans)
+    x1 = max(s["bbox"][2] for s in spans)
+    y1 = max(s["bbox"][3] for s in spans)
+    size_counts: Counter = Counter()
+    for s in spans:
+        size_counts[s["size"]] += max(1, len(s["text"].strip()))
+    # Join spans with space if there is a gap > 1.5pt
+    joined_parts: List[str] = []
+    for i, sp in enumerate(spans):
+        if i > 0:
+            gap = sp["bbox"][0] - spans[i - 1]["bbox"][2]
+            if gap > max(1.5, sp["size"] * 0.14) and not joined_parts[-1].endswith(" ") and not sp["text"].startswith(" "):
+                joined_parts.append(" ")
+        joined_parts.append(sp["text"])
+    return {
+        "block_index": b_idx,
+        "line_index": l_idx,
+        "spans": spans,
+        "bbox": [round(x0, 2), round(y0, 2), round(x1, 2), round(y1, 2)],
+        "origin": spans[0]["origin"],
+        "text": "".join(joined_parts),
+        "dom_size": float(size_counts.most_common(1)[0][0]),
+        "all_bold": all(bool(s["bold"]) for s in spans),
+        "horizontal": spans[0]["horizontal"],
+    }
+
+
 def inspect_page_objects(pdf_bytes: bytes, page_index: int = 0) -> Dict[str, Any]:
     """Return all editable objects on a page in display coordinates."""
     doc = pymupdf.open(stream=pdf_bytes, filetype="pdf")
@@ -185,16 +402,12 @@ def inspect_page_objects(pdf_bytes: bytes, page_index: int = 0) -> Dict[str, Any
 
         text_dict = page.get_text("dict", flags=pymupdf.TEXTFLAGS_DICT & ~pymupdf.TEXT_DEHYPHENATE)
         text_spans: List[Dict[str, Any]] = []
-        text_blocks: List[Dict[str, Any]] = []
         counter = 0
         for b_idx, block in enumerate(text_dict.get("blocks", [])):
             if block.get("type") != 0:
                 continue
-            block_lines: List[str] = []
-            block_ids: List[str] = []
             for l_idx, line in enumerate(block.get("lines", [])):
                 horizontal = abs(line.get("dir", (1, 0))[1]) < 1e-3
-                parts: List[str] = []
                 for s_idx, span in enumerate(line.get("spans", [])):
                     txt = span.get("text", "")
                     if not txt.strip():
@@ -230,20 +443,8 @@ def inspect_page_objects(pdf_bytes: bytes, page_index: int = 0) -> Dict[str, Any
                             "horizontal": horizontal,
                         }
                     )
-                    block_ids.append(sid)
-                    parts.append(txt)
-                if parts:
-                    block_lines.append("".join(parts))
-            if block_lines:
-                text_blocks.append(
-                    {
-                        "id": f"block_{page_index}_{b_idx}",
-                        "block_index": b_idx,
-                        "bbox": rect_to_display(page, block["bbox"]),
-                        "text": "\n".join(block_lines),
-                        "span_ids": block_ids,
-                    }
-                )
+
+        text_blocks = _build_paragraph_blocks(page_index, text_spans)
 
         images: List[Dict[str, Any]] = []
         for i_idx, info in enumerate(page.get_image_info(xrefs=True)):
@@ -1462,6 +1663,452 @@ def transform_object(
                 )
 
         return pdf_bytes
+    finally:
+        if not doc.is_closed:
+            doc.close()
+
+
+def _wrap_paragraph_lines(
+    text: str,
+    max_width: float,
+    font_obj: "pymupdf.Font",
+    fontsize: float,
+) -> List[str]:
+    """Greedily wrap `text` into lines that fit within `max_width` using `font_obj` metrics."""
+    if not text:
+        return []
+    safe_width = max(24.0, float(max_width))
+    out_lines: List[str] = []
+    for raw_para in text.split("\n"):
+        if not raw_para.strip():
+            out_lines.append("")
+            continue
+        words = raw_para.split(" ")
+        curr = ""
+        for word in words:
+            if word == "":
+                continue
+            candidate = word if not curr else f"{curr} {word}"
+            if font_obj.text_length(candidate, fontsize=fontsize) <= safe_width:
+                curr = candidate
+            else:
+                if curr:
+                    out_lines.append(curr)
+                    curr = ""
+                # Handle single unbreakable word wider than safe_width
+                if font_obj.text_length(word, fontsize=fontsize) <= safe_width:
+                    curr = word
+                else:
+                    chunk = ""
+                    for ch in word:
+                        if chunk and font_obj.text_length(chunk + ch, fontsize=fontsize) > safe_width:
+                            out_lines.append(chunk)
+                            chunk = ch
+                        else:
+                            chunk += ch
+                    curr = chunk
+        if curr or not raw_para.strip():
+            out_lines.append(curr)
+    return out_lines
+
+
+def edit_paragraph_block(
+    pdf_bytes: bytes,
+    page_index: int,
+    orig_bbox: List[float],
+    expected_orig_text: str,
+    new_text: str,
+    block_id: Optional[str] = None,
+    target_bbox: Optional[List[float]] = None,
+    font_name: Optional[str] = None,
+    font_size: Optional[float] = None,
+    color_hex: Optional[str] = None,
+    bold: Optional[bool] = None,
+    italic: Optional[bool] = None,
+    align: str = "left",
+    line_height: float = 1.25,
+    keep_original_font: bool = True,
+    overflow_policy: str = "check",
+) -> Dict[str, Any]:
+    """Atomically edit and reflow a paragraph block with overflow & neighbor protection.
+
+    overflow_policy:
+      - "check": refuse unapproved overflow/overlap and return overflow metrics without mutating.
+      - "expand_box": expand box downward into verified blank space if no neighbor collision.
+      - "shrink_font": reduce font size down to 6pt until text fits target_bbox.
+      - "force": render within target_bbox even if taller (still avoids erasing neighbors).
+    """
+    if not orig_bbox or len(orig_bbox) != 4:
+        return {"status": "error", "error": "Invalid orig_bbox", "pdf_bytes": pdf_bytes}
+
+    # 1. Inspect current page objects and validate target paragraph before any mutation
+    objs = inspect_page_objects(pdf_bytes, page_index)
+    text_blocks = objs.get("text_blocks", [])
+    text_spans = objs.get("text_spans", [])
+
+    matched_block: Optional[Dict[str, Any]] = None
+    if block_id:
+        matched_block = next((b for b in text_blocks if b.get("id") == block_id), None)
+    if matched_block is None:
+        ox0, oy0, ox1, oy1 = orig_bbox
+        best_dist = 1e9
+        for b in text_blocks:
+            bx = b["bbox"]
+            d = abs(bx[0] - ox0) + abs(bx[1] - oy0) + abs(bx[2] - ox1) + abs(bx[3] - oy1)
+            if d < best_dist and d < 24.0:
+                best_dist = d
+                matched_block = b
+
+    if matched_block is None:
+        return {
+            "status": "error",
+            "error": "Target paragraph no longer exists at the expected coordinates.",
+            "pdf_bytes": pdf_bytes,
+        }
+
+    # Validate expected original text against current paragraph text
+    norm_expected = re.sub(r"\s+", " ", (expected_orig_text or "")).strip()
+    norm_actual_exact = re.sub(r"\s+", " ", matched_block.get("text", "")).strip()
+    norm_actual_reflow = re.sub(r"\s+", " ", matched_block.get("reflow_text", "")).strip()
+    if norm_expected and norm_expected not in (norm_actual_exact, norm_actual_reflow):
+        # Allow soft-hyphenation normalization differences
+        if norm_expected.replace(" ", "") != norm_actual_exact.replace(" ", ""):
+            return {
+                "status": "error",
+                "error": "Paragraph text changed since selection; aborting to preserve content.",
+                "pdf_bytes": pdf_bytes,
+            }
+
+    target_span_ids = set(matched_block.get("span_ids", []))
+    target_spans = [s for s in text_spans if s["id"] in target_span_ids]
+
+    eff_font_name = font_name or matched_block.get("dominant_font") or "helv"
+    eff_font_size = float(font_size or matched_block.get("dominant_size") or 12.0)
+    eff_color_hex = color_hex or matched_block.get("dominant_color") or "#000000"
+    eff_bold = bool(matched_block.get("bold", False)) if bold is None else bool(bold)
+    eff_italic = bool(matched_block.get("italic", False)) if italic is None else bool(italic)
+    eff_align = align or matched_block.get("align") or "left"
+    eff_line_height = float(line_height or matched_block.get("line_height") or 1.25)
+
+    disp_target = list(target_bbox) if target_bbox and len(target_bbox) == 4 else list(matched_block["bbox"])
+
+    # 2. Identify neighbor obstacles (other text spans and images) in display space
+    page_disp_h = float(objs.get("height", 792.0))
+    neighbor_spans = [s for s in text_spans if s["id"] not in target_span_ids]
+    neighbor_obstacles = [s["bbox"] for s in neighbor_spans] + [im["bbox"] for im in objs.get("images", [])]
+
+    # 3. Resolve font, reading direction & measure wrapped lines
+    doc = pymupdf.open(stream=pdf_bytes, filetype="pdf")
+    try:
+        page = doc[page_index]
+        pdf_orig_rect = pymupdf.Rect(rect_to_pdf(page, matched_block["bbox"]))
+        pdf_target_rect = pymupdf.Rect(rect_to_pdf(page, disp_target))
+        line_dir = _detect_span_dir(page, pdf_orig_rect)
+        text_rot = _dir_to_rotate_angle(line_dir)
+
+        if abs(line_dir[0]) >= abs(line_dir[1]):
+            box_width = max(30.0, pdf_target_rect.width)
+            box_height = max(12.0, pdf_target_rect.height)
+        else:
+            box_width = max(30.0, pdf_target_rect.height)
+            box_height = max(12.0, pdf_target_rect.width)
+
+        max_safe_y1 = page_disp_h - 12.0
+        for ob in neighbor_obstacles:
+            # Check if obstacle overlaps horizontally with our target paragraph box
+            if ob[2] > disp_target[0] + 1.0 and ob[0] < disp_target[2] - 1.0:
+                if ob[1] >= disp_target[1] + 2.0:
+                    max_safe_y1 = min(max_safe_y1, float(ob[1]) - 4.0)
+        # On rotated pages where reading axis differs from display Y, allow expansion within page mediabox
+        if (page.rotation % 180) != 0 and abs(line_dir[0]) >= abs(line_dir[1]):
+            max_safe_height = max(box_height, float(page.mediabox.height) - pdf_target_rect.y0 - 12.0)
+        else:
+            max_safe_height = max(box_height, max_safe_y1 - disp_target[1])
+
+        info = resolve_pdf_font(eff_font_name, bold=eff_bold, italic=eff_italic, text_content=new_text or "A")
+        try:
+            metric_font = (
+                pymupdf.Font(fontfile=info["fontfile"])
+                if info.get("fontfile")
+                else pymupdf.Font(info["fontname"])
+            )
+        except Exception:
+            metric_font = pymupdf.Font("helv")
+
+        def measure_for_size(fs: float) -> Tuple[List[str], float]:
+            lines_w = _wrap_paragraph_lines(new_text, box_width, metric_font, fs)
+            if not lines_w:
+                return [], 0.0
+            req_h = max(fs * 1.15, (len(lines_w) - 1) * fs * eff_line_height + fs * 1.15)
+            return lines_w, req_h
+
+        wrapped_lines, required_height = measure_for_size(eff_font_size)
+        collides_if_expanded = required_height > max_safe_height + 1.5
+
+        if new_text.strip() and required_height > box_height + 2.5:
+            if overflow_policy == "check":
+                # Compute suggested font size that fits box_height
+                suggested_fs = None
+                fs_try = round(eff_font_size - 0.5, 1)
+                while fs_try >= 6.0:
+                    _, h_try = measure_for_size(fs_try)
+                    if h_try <= box_height + 1.5:
+                        suggested_fs = fs_try
+                        break
+                    fs_try = round(fs_try - 0.5, 1)
+                return {
+                    "status": "overflow",
+                    "pdf_bytes": pdf_bytes,
+                    "overflow_info": {
+                        "required_height": round(required_height, 1),
+                        "available_height": round(box_height, 1),
+                        "max_safe_expand_height": round(max_safe_height, 1),
+                        "can_expand_safely": not collides_if_expanded,
+                        "collides_with_neighbors": collides_if_expanded,
+                        "suggested_font_size": suggested_fs,
+                        "wrapped_line_count": len(wrapped_lines),
+                    },
+                }
+            elif overflow_policy == "expand_box":
+                if collides_if_expanded:
+                    return {
+                        "status": "overflow",
+                        "pdf_bytes": pdf_bytes,
+                        "overflow_info": {
+                            "required_height": round(required_height, 1),
+                            "available_height": round(box_height, 1),
+                            "max_safe_expand_height": round(max_safe_height, 1),
+                            "can_expand_safely": False,
+                            "collides_with_neighbors": True,
+                            "suggested_font_size": None,
+                            "wrapped_line_count": len(wrapped_lines),
+                        },
+                    }
+                disp_target[3] = round(disp_target[1] + required_height + 2.0, 2)
+                box_height = disp_target[3] - disp_target[1]
+            elif overflow_policy == "shrink_font":
+                fitted = False
+                fs_try = round(eff_font_size - 0.5, 1)
+                while fs_try >= 6.0:
+                    w_try, h_try = measure_for_size(fs_try)
+                    if h_try <= box_height + 1.5:
+                        eff_font_size = fs_try
+                        wrapped_lines = w_try
+                        required_height = h_try
+                        fitted = True
+                        break
+                    fs_try = round(fs_try - 0.5, 1)
+                if not fitted:
+                    return {
+                        "status": "overflow",
+                        "pdf_bytes": pdf_bytes,
+                        "overflow_info": {
+                            "required_height": round(required_height, 1),
+                            "available_height": round(box_height, 1),
+                            "max_safe_expand_height": round(max_safe_height, 1),
+                            "can_expand_safely": not collides_if_expanded,
+                            "collides_with_neighbors": collides_if_expanded,
+                            "suggested_font_size": None,
+                            "wrapped_line_count": len(wrapped_lines),
+                        },
+                    }
+
+        # 4. Pre-compute original font encoding BEFORE glyph removal
+        orig_font_ref = matched_block.get("dominant_font")
+        encoded_lines: Optional[List[Dict[str, Any]]] = None
+        enc_meta: Dict[str, Any] = {}
+        fallback_used = False
+        fallback_reason = ""
+        method = "deleted" if not new_text.strip() else ""
+        applied_font = eff_font_name
+
+        # Only reuse original font when user didn't switch font family/bold/italic and alignment is left
+        same_style = (
+            (not font_name or font_name == orig_font_ref)
+            and (bold is None or bool(bold) == bool(matched_block.get("bold")))
+            and (italic is None or bool(italic) == bool(matched_block.get("italic")))
+        )
+        if new_text.strip() and keep_original_font and orig_font_ref and same_style and eff_align in ("left", ""):
+            encoded_lines = []
+            for i, ln in enumerate(wrapped_lines):
+                if not ln:
+                    encoded_lines.append({"hex": "", "line": i})
+                    continue
+                enc, reason = _encode_with_original_font(doc, page_index, orig_font_ref, ln)
+                if enc is None:
+                    encoded_lines = None
+                    fallback_reason = reason
+                    break
+                enc_meta = enc
+                encoded_lines.append({"hex": enc["hex"], "line": i})
+        elif new_text.strip() and keep_original_font and eff_align not in ("left", ""):
+            fallback_reason = f"'{eff_align}' alignment requires re-flowing text; used a standard font."
+        elif new_text.strip() and not same_style:
+            fallback_reason = "Font family/style changed by user; standard font applied."
+
+        # 5. Capture link annotations intersecting the paragraph before redacting
+        pdf_orig_rect = pymupdf.Rect(rect_to_pdf(page, matched_block["bbox"]))
+        affected_links: List[Dict[str, Any]] = []
+        try:
+            for lk in page.get_links():
+                lk_rect = pymupdf.Rect(lk["from"])
+                if lk_rect.intersects(pdf_orig_rect):
+                    affected_links.append(dict(lk))
+        except Exception:
+            affected_links = []
+
+        # Detect reading direction and baseline origin in PDF space
+        line_dir = _detect_span_dir(page, pdf_orig_rect)
+        text_rot = _dir_to_rotate_angle(line_dir)
+        first_origin_disp = matched_block.get("first_origin")
+        if first_origin_disp and len(first_origin_disp) == 2:
+            pdf_origin = pymupdf.Point(point_to_pdf(page, first_origin_disp))
+        else:
+            pdf_origin = pymupdf.Point(pdf_orig_rect.x0, pdf_orig_rect.y0 + eff_font_size)
+
+        # Shift origin if target_bbox top-left moved from orig_bbox top-left
+        a_pt = pymupdf.Point(point_to_pdf(page, matched_block["bbox"][:2]))
+        b_pt = pymupdf.Point(point_to_pdf(page, disp_target[:2]))
+        delta = b_pt - a_pt
+        base = pdf_origin + delta
+
+        # 6. Safely remove ONLY target paragraph glyphs (line-by-line, preserving neighbors & graphics)
+        line_bboxes = matched_block.get("line_bboxes") or [matched_block["bbox"]]
+        for lb in line_bboxes:
+            lb_pdf = pymupdf.Rect(rect_to_pdf(page, lb))
+            _remove_glyphs(page, lb_pdf, line_dir=line_dir)
+
+        # 7. Re-insert reflowed lines
+        rgb = hex_to_rgb_float(eff_color_hex)
+        step = eff_font_size * eff_line_height
+        perp_x, perp_y = -line_dir[1], line_dir[0]
+
+        if new_text.strip():
+            if encoded_lines is not None and enc_meta:
+                payload = [
+                    {
+                        "origin": (
+                            base.x + e["line"] * step * perp_x,
+                            base.y + e["line"] * step * perp_y,
+                        ),
+                        "hex": e["hex"],
+                    }
+                    for e in encoded_lines
+                    if e["hex"]
+                ]
+                _write_original_font_lines(
+                    doc,
+                    page,
+                    payload,
+                    enc_meta["refname"],
+                    enc_meta["xref"],
+                    eff_font_size,
+                    rgb,
+                    line_dir=line_dir,
+                )
+                method = "original_font"
+                applied_font = orig_font_ref
+            else:
+                fallback_used = bool(keep_original_font and same_style)
+                info = resolve_pdf_font(
+                    eff_font_name,
+                    bold=eff_bold,
+                    italic=eff_italic,
+                    text_content=new_text,
+                )
+                applied_font = info["base14"] if not info["fontfile"] else info["fontfile"].rsplit("/", 1)[-1]
+                method = "substitute_font"
+                for i, ln in enumerate(wrapped_lines):
+                    if not ln:
+                        continue
+                    x_offset = 0.0
+                    if eff_align in ("center", "right"):
+                        ln_w = metric_font.text_length(ln, fontsize=eff_font_size)
+                        if eff_align == "center":
+                            x_offset = max(0.0, (box_width - ln_w) * 0.5)
+                        elif eff_align == "right":
+                            x_offset = max(0.0, box_width - ln_w)
+                    pt = pymupdf.Point(
+                        base.x + i * step * perp_x + x_offset * line_dir[0],
+                        base.y + i * step * perp_y + x_offset * line_dir[1],
+                    )
+                    page.insert_text(
+                        pt,
+                        ln,
+                        fontsize=eff_font_size,
+                        fontname=info["fontname"],
+                        fontfile=info["fontfile"],
+                        color=rgb,
+                        rotate=text_rot,
+                    )
+                if fallback_used and not fallback_reason:
+                    fallback_reason = "Original font could not encode all characters; standard font substituted."
+
+            # Restore intersecting link annotations
+            if affected_links:
+                for lk in affected_links:
+                    try:
+                        old_from = pymupdf.Rect(lk["from"])
+                        new_from = pymupdf.Rect(
+                            old_from.x0 + delta.x,
+                            old_from.y0 + delta.y,
+                            old_from.x1 + delta.x,
+                            old_from.y1 + delta.y,
+                        )
+                        lk_data: Dict[str, Any] = {"kind": lk.get("kind", pymupdf.LINK_URI), "from": new_from}
+                        if lk.get("uri"):
+                            lk_data["uri"] = lk["uri"]
+                        elif lk.get("page") is not None and lk.get("page") >= 0:
+                            lk_data["page"] = lk["page"]
+                        page.insert_link(lk_data)
+                    except Exception:
+                        pass
+
+        out_bytes = doc.tobytes(garbage=1, deflate=True)
+
+        # 8. Post-mutation atomic verification
+        verify_doc = pymupdf.open(stream=out_bytes, filetype="pdf")
+        try:
+            v_page = verify_doc[page_index]
+            v_text = v_page.get_text()
+            v_text_compact = re.sub(r"\s+", "", v_text)
+            if new_text.strip():
+                first_tok = new_text.strip().split()[0]
+                if first_tok and first_tok not in v_text and first_tok not in v_text_compact:
+                    return {
+                        "status": "error",
+                        "error": "Post-edit verification failed; original PDF restored atomically.",
+                        "pdf_bytes": pdf_bytes,
+                    }
+            # Ensure neighboring spans outside our paragraph were not accidentally erased
+            for nb in neighbor_spans[:12]:
+                nb_tok = nb["text"].strip().split()[0] if nb["text"].strip() else ""
+                if nb_tok and len(nb_tok) >= 3 and nb_tok not in v_text:
+                    return {
+                        "status": "error",
+                        "error": f"Neighboring text '{nb_tok}' would be affected; original PDF restored atomically.",
+                        "pdf_bytes": pdf_bytes,
+                    }
+        finally:
+            verify_doc.close()
+
+        return {
+            "status": "ok",
+            "pdf_bytes": out_bytes,
+            "font_strategy": method,
+            "fallback_used": fallback_used,
+            "fallback_reason": fallback_reason if fallback_used or method == "substitute_font" else "",
+            "applied_font": applied_font,
+            "final_bbox": disp_target,
+            "final_font_size": eff_font_size,
+            "wrapped_line_count": len(wrapped_lines),
+        }
+    except Exception as exc:
+        return {
+            "status": "error",
+            "error": str(exc),
+            "pdf_bytes": pdf_bytes,
+        }
     finally:
         if not doc.is_closed:
             doc.close()

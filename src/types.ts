@@ -147,13 +147,75 @@ export interface SelectedManipulableObject {
   data: VellumBoxObject | VellumShapeObject | ImageObject | TextSpanObject;
 }
 
+export interface TextBlockObject {
+  id: string;
+  block_index: number;
+  bbox: [number, number, number, number];
+  text: string;
+  reflow_text?: string;
+  span_ids: string[];
+  line_bboxes?: Array<[number, number, number, number]>;
+  first_origin?: [number, number];
+  dominant_font?: string;
+  dominant_size?: number;
+  dominant_color?: string;
+  bold?: boolean;
+  italic?: boolean;
+  line_height?: number;
+  align?: 'left' | 'center' | 'right' | 'justify';
+  is_mixed_style?: boolean;
+  has_subset_font?: boolean;
+  horizontal?: boolean;
+}
+
+export interface EditParagraphRequest {
+  block_id?: string | null;
+  orig_bbox: [number, number, number, number];
+  expected_orig_text: string;
+  new_text: string;
+  target_bbox?: [number, number, number, number] | null;
+  font_name?: string | null;
+  font_size?: number | null;
+  color_hex?: string | null;
+  bold?: boolean | null;
+  italic?: boolean | null;
+  align?: 'left' | 'center' | 'right' | 'justify';
+  line_height?: number;
+  keep_original_font?: boolean;
+  overflow_policy?: 'check' | 'expand_box' | 'shrink_font' | 'force';
+}
+
+export interface ParagraphOverflowInfo {
+  required_height: number;
+  available_height: number;
+  max_safe_expand_height: number;
+  can_expand_safely: boolean;
+  collides_with_neighbors: boolean;
+  suggested_font_size: number | null;
+  wrapped_line_count: number;
+}
+
+export interface EditParagraphResponse {
+  status: 'ok' | 'overflow';
+  summary: DocumentSummary;
+  objects?: PageObjectsData;
+  overflow_info?: ParagraphOverflowInfo;
+  font_strategy?: string;
+  fallback_used?: boolean;
+  fallback_reason?: string;
+  applied_font?: string;
+  final_bbox?: [number, number, number, number];
+  final_font_size?: number;
+  wrapped_line_count?: number;
+}
+
 export interface PageObjectsData {
   page_index: number;
   width: number;
   height: number;
   rotation: number;
   text_spans: TextSpanObject[];
-  text_blocks?: Array<{ id: string; block_index: number; bbox: [number, number, number, number]; text: string; span_ids: string[] }>;
+  text_blocks?: TextBlockObject[];
   images: ImageObject[];
   links: LinkObject[];
   vector_drawings_count: number;

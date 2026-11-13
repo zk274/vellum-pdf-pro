@@ -4,6 +4,8 @@ import {
   BookmarkItem,
   ComparisonReport,
   DocumentSummary,
+  EditParagraphRequest,
+  EditParagraphResponse,
   FontItem,
   FormFieldItem,
   PageObjectsData,
@@ -167,6 +169,11 @@ export const pdfApi = {
       fallback_reason: string;
       applied_font: string;
     }>(`/api/docs/${docId}/pages/${pageIndex}/edit-text`, {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+  editParagraph: (docId: string, pageIndex: number, payload: EditParagraphRequest) =>
+    requestJson<EditParagraphResponse>(`/api/docs/${docId}/pages/${pageIndex}/edit-paragraph`, {
       method: 'POST',
       body: JSON.stringify(payload),
     }),

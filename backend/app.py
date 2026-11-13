@@ -20,6 +20,7 @@ from .engine.direct_edit import (
     add_shape_object,
     add_text_object,
     edit_image_object,
+    edit_paragraph_block,
     edit_text_span,
     insert_image_object,
     inspect_page_objects,
@@ -148,6 +149,23 @@ class EditTextSpanRequest(BaseModel):
     align: str = "left"
     line_height: float = 1.2
     keep_original_font: bool = True
+
+
+class EditParagraphRequest(BaseModel):
+    block_id: Optional[str] = None
+    orig_bbox: List[float]
+    expected_orig_text: str
+    new_text: str
+    target_bbox: Optional[List[float]] = None
+    font_name: Optional[str] = None
+    font_size: Optional[float] = None
+    color_hex: Optional[str] = None
+    bold: Optional[bool] = None
+    italic: Optional[bool] = None
+    align: str = "left"
+    line_height: float = 1.25
+    keep_original_font: bool = True
+    overflow_policy: str = "check"
 
 
 class AddTextRequest(BaseModel):
@@ -772,6 +790,52 @@ def api_edit_text_span(doc_id: str, page_index: int, req: EditTextSpanRequest) -
         "fallback_reason": res["fallback_reason"],
         "applied_font": res["applied_font"],
     }
+
+
+@app.post("/api/docs/{doc_id}/pages/{page_index}/edit-paragraph")
+def api_edit_paragraph_block(doc_id: str, page_index: int, req: EditParagraphRequest) -> Dict[str, Any]:
+    session = session_manager.get_session(doc_id)
+    res = edit_paragraph_block(
+        pdf_bytes=session.pdf_bytes,
+        page_index=page_index,
+        block_id=req.block_id,
+        orig_bbox=req.orig_bbox,
+        expected_orig_text=req.expected_orig_text,
+        new_text=req.new_text,
+        target_bbox=req.target_bbox,
+        font_name=req.font_name,
+        font_size=req.font_size,
+        color_hex=req.color_hex,
+        bold=req.bold,
+        italic=req.italic,
+        align=req.align,
+        line_height=req.line_height,
+        keep_original_font=req.keep_original_font,
+        overflow_policy=req.overflow_policy,
+    )
+    if res["status"] == "ok":
+        action_label = f"Edit Paragraph ('{req.new_text[:24]}')" if req.new_text.strip() else "Delete Paragraph"
+        session_manager.update_session(doc_id, res["pdf_bytes"], action=action_label)
+        return {
+            "status": "ok",
+            "summary": session_manager.get_document_summary(doc_id),
+            "objects": inspect_page_objects(session.pdf_bytes, page_index=page_index),
+            "font_strategy": res.get("font_strategy", ""),
+            "fallback_used": res.get("fallback_used", False),
+            "fallback_reason": res.get("fallback_reason", ""),
+            "applied_font": res.get("applied_font", ""),
+            "final_bbox": res.get("final_bbox"),
+            "final_font_size": res.get("final_font_size"),
+            "wrapped_line_count": res.get("wrapped_line_count", 0),
+        }
+    elif res["status"] == "overflow":
+        return {
+            "status": "overflow",
+            "summary": session_manager.get_document_summary(doc_id),
+            "overflow_info": res.get("overflow_info", {}),
+        }
+    else:
+        raise HTTPException(status_code=400, detail=res.get("error", "Paragraph edit failed"))
 
 
 @app.post("/api/docs/{doc_id}/pages/{page_index}/add-text")

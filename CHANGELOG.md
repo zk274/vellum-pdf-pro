@@ -7,6 +7,13 @@ The project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html
 
 ## [Unreleased]
 
+### Added
+- **Acrobat-Style Intelligent Paragraph Editor & Safe Reflow (Issue #1)**:
+  - Added multi-line paragraph block grouping in `backend/engine/direct_edit.py` (`inspect_page_objects` / `_build_paragraph_blocks`) that separates headings, multi-column text, table cells, and wide vertical gaps while preserving dominant font, size, color, bold/italic style, line height, and alignment.
+  - Added `edit_paragraph_block()` and `POST /api/docs/{doc_id}/pages/{page_index}/edit-paragraph` with expected-text validation, greedy word-wrapping with long-word breaking, rotated-page support (0°/90°/180°/270°), neighbor collision detection, explicit overflow policies (`check`, `expand_box`, `shrink_font`, `force`), link preservation, and atomic rollback on verification failure.
+  - Added double-click paragraph editing on text spans/blocks, a dedicated **Edit Paragraph** tool, an inline reflow editor with overflow resolution banner (`Expand Box`, `Fit Font Size`, `Cancel`), right-inspector **Paragraph Editor & Reflow** controls, and full Undo/Redo support.
+  - Added automated regression coverage (`test_intelligent_paragraph_editing_reflow_overflow_and_safety`) and end-to-end packaged AppImage CDP verification.
+
 ### Fixed
 - **Native Text Span Moving, Resizing, and Hyperlink Preservation**:
   - Permanently fixed regression where moving or resizing native PDF text spans caused text to disappear from the rendered canvas.
