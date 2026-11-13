@@ -1,0 +1,500 @@
+[
+  {
+    "fixture_id": "lo_writer_real",
+    "category": "LibreOffice Writer",
+    "origin": "real_libreoffice_writer",
+    "description": "Real LibreOffice Writer HTML->PDF export with mixed runs, hyperlink, and table",
+    "input_sha256": "7ff8b80f9f151a5790021ec347313f10c7189a995ac4fc5798c6fe65f646143b",
+    "status": "PASS",
+    "checks": {
+      "initial_render_ok": true,
+      "span_count": 20,
+      "block_count": 10,
+      "image_count": 0,
+      "link_count": 1,
+      "rejected_edit_unchanged_bytes": true,
+      "neighbor_collision_protected": true,
+      "after_edit_sha256": "20a7dfc04099072d2f9fe161e8334c29019159730f60eb1dcfbef556d737ada4",
+      "raster_diff": {
+        "size_match": true,
+        "mean_abs_diff": 0.0,
+        "changed_pixel_pct": 0.0
+      },
+      "pymupdf_text_verified": true,
+      "pdftotext_verified": true,
+      "pdfinfo_valid": true,
+      "gs_render_ok": true,
+      "undo_redo_ok": true,
+      "save_and_reopen_ok": true
+    },
+    "issues": []
+  },
+  {
+    "fixture_id": "lo_calc_real",
+    "category": "LibreOffice Calc",
+    "origin": "real_libreoffice_calc",
+    "description": "Real LibreOffice Calc CSV->PDF spreadsheet export",
+    "input_sha256": "4877bd4c7be4db38ac8bde9151079a44ca1c972d012182c25c4437ed8a6a1504",
+    "status": "PASS",
+    "checks": {
+      "initial_render_ok": true,
+      "span_count": 18,
+      "block_count": 18,
+      "image_count": 0,
+      "link_count": 0,
+      "rejected_edit_unchanged_bytes": true,
+      "neighbor_collision_protected": true,
+      "tight_cell_overflow_refused_safely": true,
+      "after_edit_sha256": "316d18fedb9e372674bf4368d8fc6ceef78cb6ff1214721c0b29a4f066264896",
+      "raster_diff": {
+        "size_match": true,
+        "mean_abs_diff": 0.0,
+        "changed_pixel_pct": 0.0
+      },
+      "pymupdf_text_verified": true,
+      "pdftotext_verified": true,
+      "pdfinfo_valid": true,
+      "gs_render_ok": true,
+      "undo_redo_ok": true,
+      "save_and_reopen_ok": true
+    },
+    "issues": []
+  },
+  {
+    "fixture_id": "chrome_headless_real",
+    "category": "Browser-Exported PDF (Chrome)",
+    "origin": "real_chrome_headless",
+    "description": "Real Google Chrome headless --print-to-pdf multi-column HTML/CSS export",
+    "input_sha256": "98459ad83262c044e8f121c338e934174673be663c566d6ecebfc539e6425cee",
+    "status": "PASS",
+    "checks": {
+      "initial_render_ok": true,
+      "span_count": 12,
+      "block_count": 4,
+      "image_count": 0,
+      "link_count": 1,
+      "rejected_edit_unchanged_bytes": true,
+      "after_edit_sha256": "243b99d3f39049f3d30bc8a43fce28302167ca45fc3887acd46df71880a84657",
+      "raster_diff": {
+        "size_match": true,
+        "mean_abs_diff": 0.0,
+        "changed_pixel_pct": 0.0
+      },
+      "pymupdf_text_verified": true,
+      "pdftotext_verified": true,
+      "pdfinfo_valid": true,
+      "gs_render_ok": true,
+      "undo_redo_ok": true,
+      "save_and_reopen_ok": true
+    },
+    "issues": []
+  },
+  {
+    "fixture_id": "msoffice_style_synthetic",
+    "category": "Microsoft Office-Style (Synthetic)",
+    "origin": "synthetic_pymupdf",
+    "description": "Synthetic Office-style contract layout (native MS Office binary not present on Linux)",
+    "input_sha256": "5a42514612e9ac5117f5ad84758b64eb153f82bf49a46f426a97cbe32c039dbf",
+    "status": "PASS",
+    "checks": {
+      "initial_render_ok": true,
+      "span_count": 4,
+      "block_count": 3,
+      "image_count": 0,
+      "link_count": 0,
+      "rejected_edit_unchanged_bytes": true,
+      "after_edit_sha256": "845ff159367895cd02d3389761a7713444a1fdeba91427bcc185f3883246489b",
+      "raster_diff": {
+        "size_match": true,
+        "mean_abs_diff": 0.0,
+        "changed_pixel_pct": 0.0
+      },
+      "pymupdf_text_verified": true,
+      "pdftotext_verified": true,
+      "pdfinfo_valid": true,
+      "gs_render_ok": true,
+      "undo_redo_ok": true,
+      "save_and_reopen_ok": true
+    },
+    "issues": []
+  },
+  {
+    "fixture_id": "scanned_page_synthetic",
+    "category": "Scanned Page (Image-Only)",
+    "origin": "synthetic_pymupdf",
+    "description": "Synthetic rasterized scanned page without embedded text layer",
+    "input_sha256": "87346a82f07f3e4c6fb8118bd0412d2b10174c14a0cf024141a77adbba2673d2",
+    "status": "PASS",
+    "checks": {
+      "initial_render_ok": true,
+      "span_count": 0,
+      "block_count": 0,
+      "image_count": 1,
+      "link_count": 0,
+      "scanned_image_detected": true
+    },
+    "issues": []
+  },
+  {
+    "fixture_id": "invoice_synthetic",
+    "category": "Invoice",
+    "origin": "synthetic_pymupdf",
+    "description": "Synthetic invoice with colored vector banner and bordered table rows",
+    "input_sha256": "203aa89286a526c61cc5731b4962c976a3444ba4447269849044ef251ff7effe",
+    "status": "PASS",
+    "checks": {
+      "initial_render_ok": true,
+      "span_count": 6,
+      "block_count": 5,
+      "image_count": 0,
+      "link_count": 0,
+      "rejected_edit_unchanged_bytes": true,
+      "after_edit_sha256": "ecdda5b85a85c1c7066952b3f09317afc06ac7120f669649d578cc73c773880b",
+      "raster_diff": {
+        "size_match": true,
+        "mean_abs_diff": 0.0,
+        "changed_pixel_pct": 0.0
+      },
+      "pymupdf_text_verified": true,
+      "pdftotext_verified": true,
+      "pdfinfo_valid": true,
+      "gs_render_ok": true,
+      "undo_redo_ok": true,
+      "save_and_reopen_ok": true
+    },
+    "issues": []
+  },
+  {
+    "fixture_id": "acroform_synthetic",
+    "category": "Complex Forms (AcroForm)",
+    "origin": "synthetic_pymupdf",
+    "description": "Synthetic AcroForm with text widget + checkbox + surrounding labels",
+    "input_sha256": "ab1ecfaf412569f26d1e3f2e03a2bc0d51fc3c3a7dabb63e0cf4e851f905de98",
+    "status": "PASS",
+    "checks": {
+      "initial_render_ok": true,
+      "span_count": 5,
+      "block_count": 5,
+      "image_count": 0,
+      "link_count": 0,
+      "rejected_edit_unchanged_bytes": true,
+      "neighbor_collision_protected": true,
+      "after_edit_sha256": "18e1aac0b5d81aa9735929f7b0cb3cf34fe42095310c9694f2ac72c362f2d1ac",
+      "raster_diff": {
+        "size_match": true,
+        "mean_abs_diff": 0.0,
+        "changed_pixel_pct": 0.0
+      },
+      "pymupdf_text_verified": true,
+      "pdftotext_verified": true,
+      "pdfinfo_valid": true,
+      "gs_render_ok": true,
+      "undo_redo_ok": true,
+      "save_and_reopen_ok": true
+    },
+    "issues": []
+  },
+  {
+    "fixture_id": "multicolumn_synthetic",
+    "category": "Multi-Column Layout",
+    "origin": "synthetic_pymupdf",
+    "description": "Synthetic 2-column layout verifying column isolation during paragraph edit",
+    "input_sha256": "e07eed41de91ccc77059971b1a8540fa667b0062e53e3e9781d424c760b9979c",
+    "status": "PASS",
+    "checks": {
+      "initial_render_ok": true,
+      "span_count": 4,
+      "block_count": 2,
+      "image_count": 0,
+      "link_count": 0,
+      "rejected_edit_unchanged_bytes": true,
+      "after_edit_sha256": "97d48e24c63c2ea341709c8321cb0642ae44cacb156ef28d9eaf303546ae6359",
+      "raster_diff": {
+        "size_match": true,
+        "mean_abs_diff": 0.0,
+        "changed_pixel_pct": 0.0
+      },
+      "pymupdf_text_verified": true,
+      "pdftotext_verified": true,
+      "pdfinfo_valid": true,
+      "gs_render_ok": true,
+      "undo_redo_ok": true,
+      "save_and_reopen_ok": true
+    },
+    "issues": []
+  },
+  {
+    "fixture_id": "mixed_links_annots_redact_synthetic",
+    "category": "Mixed Formatting, Links, Annotations & Redaction",
+    "origin": "synthetic_pymupdf",
+    "description": "Synthetic mixed runs + /Link + Highlight/Text annotations + redaction target",
+    "input_sha256": "33e5a44b6e6b7104b93fa6c780e66886519702d31b38a491683643be31c7bd6a",
+    "status": "PASS",
+    "checks": {
+      "initial_render_ok": true,
+      "span_count": 7,
+      "block_count": 4,
+      "image_count": 0,
+      "link_count": 1,
+      "rejected_edit_unchanged_bytes": true,
+      "after_edit_sha256": "c2f0c3e01d9178f625e8e2e09675e077d8b448217d4797e2d35e133e97267632",
+      "raster_diff": {
+        "size_match": true,
+        "mean_abs_diff": 0.0,
+        "changed_pixel_pct": 0.0
+      },
+      "pymupdf_text_verified": true,
+      "pdftotext_verified": true,
+      "pdfinfo_valid": true,
+      "gs_render_ok": true,
+      "undo_redo_ok": true,
+      "save_and_reopen_ok": true,
+      "permanent_redaction_verified": true
+    },
+    "issues": []
+  },
+  {
+    "fixture_id": "subset_unicode_synthetic",
+    "category": "Embedded/Subset Fonts & Unicode",
+    "origin": "synthetic_pymupdf",
+    "description": "Synthetic subsetted DejaVuSans PDF with Unicode + ligatures",
+    "input_sha256": "aad4ea1f48ad971651d4f21e0fe20452dfda0f6ea8f01d5f309fbc9bacb0e27f",
+    "status": "PASS",
+    "checks": {
+      "initial_render_ok": true,
+      "span_count": 1,
+      "block_count": 1,
+      "image_count": 0,
+      "link_count": 0,
+      "rejected_edit_unchanged_bytes": true,
+      "after_edit_sha256": "b6d60ae469c089d60858f5da4ea08de3d31e3b108b9111999ae795ec80b2ae4c",
+      "raster_diff": {
+        "size_match": true,
+        "mean_abs_diff": 0.0,
+        "changed_pixel_pct": 0.0
+      },
+      "pymupdf_text_verified": true,
+      "pdftotext_verified": true,
+      "pdfinfo_valid": true,
+      "gs_render_ok": true,
+      "undo_redo_ok": true,
+      "save_and_reopen_ok": true
+    },
+    "issues": []
+  },
+  {
+    "fixture_id": "rotation_90_synthetic",
+    "category": "Page Rotation (90\u00b0)",
+    "origin": "synthetic_pymupdf",
+    "description": "Synthetic page rotated 90 degrees",
+    "input_sha256": "4b74f45e72bf152e3c771b6b1b3d5dec9a19e721ae75e6b38e6a0a13ff1927b6",
+    "status": "PASS",
+    "checks": {
+      "initial_render_ok": true,
+      "span_count": 2,
+      "block_count": 2,
+      "image_count": 0,
+      "link_count": 0,
+      "rejected_edit_unchanged_bytes": true,
+      "after_edit_sha256": "fc237d8df71e647d7c2e93951b585213ca5cb7469c147a1e4c0746fc7cbb84cb",
+      "raster_diff": {
+        "size_match": true,
+        "mean_abs_diff": 0.0175,
+        "changed_pixel_pct": 0.0167
+      },
+      "pymupdf_text_verified": true,
+      "pdftotext_verified": true,
+      "pdfinfo_valid": true,
+      "gs_render_ok": true,
+      "undo_redo_ok": true,
+      "save_and_reopen_ok": true
+    },
+    "issues": []
+  },
+  {
+    "fixture_id": "rotation_180_synthetic",
+    "category": "Page Rotation (180\u00b0)",
+    "origin": "synthetic_pymupdf",
+    "description": "Synthetic page rotated 180 degrees",
+    "input_sha256": "859dbaab8a46895113270c6af80667557effef980a1911b5aa537762f46912ad",
+    "status": "PASS",
+    "checks": {
+      "initial_render_ok": true,
+      "span_count": 2,
+      "block_count": 2,
+      "image_count": 0,
+      "link_count": 0,
+      "rejected_edit_unchanged_bytes": true,
+      "after_edit_sha256": "96ff4f6009fd7e3871040a30490c303a5b4e2a56b4da96712494666a70fbb324",
+      "raster_diff": {
+        "size_match": true,
+        "mean_abs_diff": 0.0188,
+        "changed_pixel_pct": 0.0176
+      },
+      "pymupdf_text_verified": true,
+      "pdftotext_verified": true,
+      "pdfinfo_valid": true,
+      "gs_render_ok": true,
+      "undo_redo_ok": true,
+      "save_and_reopen_ok": true
+    },
+    "issues": []
+  },
+  {
+    "fixture_id": "rotation_270_synthetic",
+    "category": "Page Rotation (270\u00b0)",
+    "origin": "synthetic_pymupdf",
+    "description": "Synthetic page rotated 270 degrees",
+    "input_sha256": "05c5b41adc17e32341cf9ee182b93ef62f1d27625f881d4d5faeda76a19581ae",
+    "status": "PASS",
+    "checks": {
+      "initial_render_ok": true,
+      "span_count": 2,
+      "block_count": 2,
+      "image_count": 0,
+      "link_count": 0,
+      "rejected_edit_unchanged_bytes": true,
+      "after_edit_sha256": "7b531b757fa2df10d5299b08037182a155818bd2abca71e732cfafdf5d2f8c28",
+      "raster_diff": {
+        "size_match": true,
+        "mean_abs_diff": 0.0236,
+        "changed_pixel_pct": 0.0203
+      },
+      "pymupdf_text_verified": true,
+      "pdftotext_verified": true,
+      "pdfinfo_valid": true,
+      "gs_render_ok": true,
+      "undo_redo_ok": true,
+      "save_and_reopen_ok": true
+    },
+    "issues": []
+  },
+  {
+    "fixture_id": "images_vectors_synthetic",
+    "category": "Images & Vector Backgrounds",
+    "origin": "synthetic_pymupdf",
+    "description": "Synthetic PDF with raster PNG image and text over colored vector fill",
+    "input_sha256": "34d84aabf612a3a43c850c05aa6e1debdb714aaaa5067972a5d250b73af61972",
+    "status": "PASS",
+    "checks": {
+      "initial_render_ok": true,
+      "span_count": 1,
+      "block_count": 1,
+      "image_count": 1,
+      "link_count": 0,
+      "rejected_edit_unchanged_bytes": true,
+      "after_edit_sha256": "5395f8bd0bc6a4f79527307c5b39c61cf5203c9ab550b014e1d422a3cb66399d",
+      "raster_diff": {
+        "size_match": true,
+        "mean_abs_diff": 0.0,
+        "changed_pixel_pct": 0.0
+      },
+      "pymupdf_text_verified": true,
+      "pdftotext_verified": true,
+      "pdfinfo_valid": true,
+      "gs_render_ok": true,
+      "undo_redo_ok": true,
+      "save_and_reopen_ok": true
+    },
+    "issues": []
+  },
+  {
+    "fixture_id": "large_40p_synthetic",
+    "category": "Large Document (40 Pages)",
+    "origin": "synthetic_pymupdf",
+    "description": "Synthetic 40-page document testing mid-document edit and structural persistence",
+    "input_sha256": "130d3d21312d70ffdac2750ab2451d19355620b6c999f61890574215244524dc",
+    "status": "PASS",
+    "checks": {
+      "initial_render_ok": true,
+      "span_count": 2,
+      "block_count": 2,
+      "image_count": 0,
+      "link_count": 0,
+      "rejected_edit_unchanged_bytes": true,
+      "after_edit_sha256": "6ea1e07a40b7271772c68cafc6d2cc93a7e63d8bdefd6ff41345d6c5e494a52b",
+      "raster_diff": {
+        "size_match": true,
+        "mean_abs_diff": 0.0,
+        "changed_pixel_pct": 0.0
+      },
+      "pymupdf_text_verified": true,
+      "pdftotext_verified": true,
+      "pdfinfo_valid": true,
+      "gs_render_ok": true,
+      "undo_redo_ok": true,
+      "save_and_reopen_ok": true
+    },
+    "issues": []
+  },
+  {
+    "fixture_id": "encrypted_aes256_synthetic",
+    "category": "Encrypted PDF (AES-256)",
+    "origin": "synthetic_pymupdf",
+    "description": "Synthetic AES-256 password-protected PDF",
+    "input_sha256": "dc32f4987e17d27b1eeb5ea7f3364331eeaf7caa4198cc8bad8b81ef60621d9a",
+    "status": "PASS",
+    "checks": {
+      "wrong_password_rejected": true,
+      "initial_render_ok": true,
+      "span_count": 1,
+      "block_count": 1,
+      "image_count": 0,
+      "link_count": 0,
+      "rejected_edit_unchanged_bytes": true,
+      "after_edit_sha256": "d79251a8aa1f7c8229d7a7b8bb5e38ebc35840bcda27eb3fde1aaa31405eacb1",
+      "raster_diff": {
+        "size_match": true,
+        "mean_abs_diff": 0.0,
+        "changed_pixel_pct": 0.0
+      },
+      "pymupdf_text_verified": true,
+      "pdftotext_verified": true,
+      "pdfinfo_valid": true,
+      "undo_redo_ok": true,
+      "save_and_reopen_ok": true
+    },
+    "issues": []
+  },
+  {
+    "fixture_id": "malformed_truncated_synthetic",
+    "category": "Malformed / Truncated PDF",
+    "origin": "synthetic_malformed",
+    "description": "Truncated non-PDF garbage payload",
+    "input_sha256": "035f647b432d79afeb60bda1b6b32138f7e365f49004ca5cde90f6853c73242d",
+    "status": "PASS",
+    "checks": {
+      "open_rejected_cleanly": true
+    },
+    "issues": []
+  },
+  {
+    "fixture_id": "hostile_js_openaction_synthetic",
+    "category": "Hostile PDF (/OpenAction JavaScript)",
+    "origin": "synthetic_pikepdf",
+    "description": "Synthetic PDF with /OpenAction /JavaScript payload to verify passive non-execution",
+    "input_sha256": "be2b7111a7b058b7aa5f74a44163ae063ff1c68e76e983be9d8e854976e97294",
+    "status": "PASS",
+    "checks": {
+      "initial_render_ok": true,
+      "span_count": 1,
+      "block_count": 1,
+      "image_count": 0,
+      "link_count": 0,
+      "rejected_edit_unchanged_bytes": true,
+      "after_edit_sha256": "af8ffcfd9a7915a43f51cffed0db0cfe073d051900c6007b778fbfa3e7d609eb",
+      "raster_diff": {
+        "size_match": true,
+        "mean_abs_diff": 0.0,
+        "changed_pixel_pct": 0.0
+      },
+      "pymupdf_text_verified": true,
+      "pdftotext_verified": true,
+      "pdfinfo_valid": true,
+      "gs_render_ok": true,
+      "undo_redo_ok": true,
+      "save_and_reopen_ok": true
+    },
+    "issues": []
+  }
+]
