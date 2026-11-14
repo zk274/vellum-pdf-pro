@@ -264,7 +264,9 @@ def create_form_field(
             widget.fill_color = list(hex_to_rgb_float(fill_color_hex))
         if border_color_hex and border_color_hex.lower() != "transparent":
             widget.border_color = list(hex_to_rgb_float(border_color_hex))
-        widget.border_width = 1.0
+            widget.border_width = 1.0
+        else:
+            widget.border_width = 0.0
 
         kind = field_type.lower().strip()
         if kind in ("text", "multiline"):
@@ -566,20 +568,57 @@ def reorder_form_tab_order(pdf_bytes: bytes, page_index: int, ordered_xrefs: Lis
 
 
 def detect_form_field_candidates(pdf_bytes: bytes, page_index: int = 0) -> List[Dict[str, Any]]:
-    """Heuristically suggest AcroForm fields from static rectangles/lines without altering the PDF."""
+    """Heuristically suggest AcroForm fields from static rectangles/tables/checkboxes without altering the PDF."""
     doc = pymupdf.open(stream=pdf_bytes, filetype="pdf")
     try:
         page = doc[page_index]
-        existing_rects = [w.rect for w in (page.widgets() or [])]
+        existing_widgets = list(page.widgets() or [])
+        existing_rects = [w.rect for w in existing_widgets]
+        used_names: set = {str(w.field_name or "").strip() for w in existing_widgets if getattr(w, "field_name", None)}
+
         text_spans: List[Dict[str, Any]] = []
         tdict = page.get_text("dict")
         for blk in tdict.get("blocks", []):
             if blk.get("type") != 0:
                 continue
             for ln in blk.get("lines", []):
-                txt = "".join(sp.get("text", "") for sp in ln.get("spans", [])).strip()
+                spans = ln.get("spans", [])
+                txt = "".join(sp.get("text", "") for sp in spans).strip()
                 if txt:
-                    text_spans.append({"text": txt, "rect": pymupdf.Rect(ln["bbox"])})
+                    avg_size = sum(float(sp.get("size", 10.0)) for sp in spans) / max(1, len(spans))
+                    text_spans.append({
+                        "text": txt,
+                        "rect": pymupdf.Rect(ln["bbox"]),
+                        "size": avg_size,
+                    })
+
+        word_spans: List[Dict[str, Any]] = [
+            {"text": str(w[4]).strip(), "rect": pymupdf.Rect(w[0], w[1], w[2], w[3])}
+            for w in (page.get_text("words") or [])
+            if str(w[4]).strip()
+        ]
+
+        drawings = page.get_drawings()
+        vertical_dividers: List[Tuple[float, float, float]] = []
+        disabled_fill_rects: List[pymupdf.Rect] = []
+
+        def _is_disabled_grey_fill(fill: Any) -> bool:
+            if not fill or not isinstance(fill, (tuple, list)) or len(fill) < 3:
+                return False
+            r_c, g_c, b_c = float(fill[0]), float(fill[1]), float(fill[2])
+            return 0.25 <= r_c <= 0.78 and abs(r_c - g_c) <= 0.06 and abs(g_c - b_c) <= 0.06
+
+        for d in drawings:
+            dr = pymupdf.Rect(d["rect"])
+            if 0.3 <= dr.width <= 3.0 and dr.height >= 35:
+                vertical_dividers.append(((dr.x0 + dr.x1) / 2.0, dr.y0, dr.y1))
+            for item in d.get("items", []):
+                if item and item[0] == "l" and len(item) >= 3:
+                    p1, p2 = item[1], item[2]
+                    if abs(p1.x - p2.x) <= 1.5 and abs(p1.y - p2.y) >= 35:
+                        vertical_dividers.append(((p1.x + p2.x) / 2.0, min(p1.y, p2.y), max(p1.y, p2.y)))
+            if dr.width >= 20 and dr.height >= 12 and _is_disabled_grey_fill(d.get("fill")):
+                disabled_fill_rects.append(dr)
 
         candidates: List[Dict[str, Any]] = []
         seen_boxes: List[pymupdf.Rect] = []
@@ -591,36 +630,121 @@ def detect_form_field_candidates(pdf_bytes: bytes, page_index: int = 0) -> List[
                     return True
             return False
 
+        def _text_inside(r: pymupdf.Rect) -> str:
+            inner = pymupdf.Rect(r.x0 - 1, r.y0 - 1, r.x1 + 1, r.y1 + 1)
+            hits = [
+                sp for sp in text_spans
+                if inner.contains(pymupdf.Point((sp["rect"].x0 + sp["rect"].x1) / 2.0, (sp["rect"].y0 + sp["rect"].y1) / 2.0))
+            ]
+            hits.sort(key=lambda s: (round(s["rect"].y0 / 4.0), s["rect"].x0))
+            return " ".join(h["text"] for h in hits).strip()
+
+        def _is_cell_disabled(r: pymupdf.Rect) -> bool:
+            inside_txt = _text_inside(r).upper()
+            if inside_txt in ("N/A", "NA", "NONE", "-", "—"):
+                return True
+            for df in disabled_fill_rects:
+                inter = r & df
+                if not inter.is_empty and inter.get_area() >= 0.5 * r.get_area():
+                    return True
+            return False
+
+        def _left_row_label(r: pymupdf.Rect) -> str:
+            # Find primary label(s) to the left on the same horizontal band
+            left_hits: List[Dict[str, Any]] = []
+            for sp in text_spans:
+                sr = sp["rect"]
+                txt_u = sp["text"].strip().upper()
+                if txt_u in ("N/A", "NA", "NONE", "-", "—"):
+                    continue
+                if sr.x1 > r.x0 + 10:
+                    continue
+                v_overlap = min(sr.y1, r.y1) - max(sr.y0, r.y0)
+                mid_diff = abs((sr.y0 + sr.y1) / 2.0 - (r.y0 + r.y1) / 2.0)
+                if v_overlap >= 2 or mid_diff <= max(14.0, r.height * 0.45):
+                    if r.x0 - sr.x1 <= 260:
+                        left_hits.append(sp)
+            if not left_hits:
+                return ""
+            # Prefer non-parenthetical primary lines (closest horizontally, but accept table row labels up to 260pt)
+            left_hits.sort(key=lambda s: (abs(r.x0 - s["rect"].x1) > 150, s["rect"].y0, s["rect"].x0))
+            primary = [h for h in left_hits if not h["text"].startswith("(") and h["size"] >= 7.5]
+            if primary:
+                # If multi-line label in the same column (e.g. LONG HAUL / TRUCKING-MEDIUM), join lines
+                anchor_x = primary[0]["rect"].x0
+                same_col = [h for h in primary if abs(h["rect"].x0 - anchor_x) <= 24]
+                same_col.sort(key=lambda s: s["rect"].y0)
+                return " ".join(h["text"].rstrip(":") for h in same_col[:2]).strip()
+            return left_hits[0]["text"].rstrip(":")
+
         def _nearest_label(r: pymupdf.Rect) -> str:
+            left_lbl = _left_row_label(r)
+            if left_lbl:
+                return left_lbl
             best_txt = ""
             best_dist = 180.0
             for sp in text_spans:
                 sr = sp["rect"]
-                # Prefer label directly to the left on same row, or directly above
-                if abs((sr.y0 + sr.y1) / 2 - (r.y0 + r.y1) / 2) <= 16 and sr.x1 <= r.x0 + 8:
-                    dist = max(0.0, r.x0 - sr.x1)
-                elif 0 <= r.y0 - sr.y1 <= 22 and abs(sr.x0 - r.x0) <= 60:
-                    dist = (r.y0 - sr.y1) + 12.0
-                else:
+                if sr.size < 7.5 or sp["text"].startswith("("):
                     continue
-                if dist < best_dist:
-                    best_dist = dist
-                    best_txt = sp["text"]
+                if 0 <= r.y0 - sr.y1 <= 16 and abs(sr.x0 - r.x0) <= 60:
+                    dist = (r.y0 - sr.y1) + 12.0
+                    if dist < best_dist:
+                        best_dist = dist
+                        best_txt = sp["text"].rstrip(":")
             return best_txt
+
+        def _col_header_for_cell(cell_r: pymupdf.Rect, table_top_y: float) -> str:
+            cx = (cell_r.x0 + cell_r.x1) / 2.0
+            hits = []
+            for sp in text_spans:
+                sr = sp["rect"]
+                if sr.y1 <= cell_r.y0 + 2 and sr.y0 >= table_top_y - 36:
+                    # Prefer line span if it doesn't straddle far outside this cell
+                    if sr.x0 >= cell_r.x0 - 10 and sr.x1 <= cell_r.x1 + 10:
+                        hits.append(sp)
+            if not hits:
+                # Fall back to word-level spans when a header line straddles two columns (e.g. "ACCIDENT SECONDARY")
+                word_hits = [
+                    ws for ws in word_spans
+                    if ws["rect"].y1 <= cell_r.y0 + 2
+                    and ws["rect"].y0 >= table_top_y - 36
+                    and ws["rect"].x0 - 6 <= cx <= ws["rect"].x1 + 6
+                ]
+                if word_hits:
+                    word_hits.sort(key=lambda s: abs(cell_r.y0 - s["rect"].y1))
+                    return word_hits[0]["text"].strip()
+                for sp in text_spans:
+                    sr = sp["rect"]
+                    if sr.y1 <= cell_r.y0 + 2 and sr.y0 >= table_top_y - 36:
+                        if sr.x0 - 12 <= cx <= sr.x1 + 12 or (min(sr.x1, cell_r.x1) - max(sr.x0, cell_r.x0)) >= 8:
+                            hits.append(sp)
+            if not hits:
+                return ""
+            hits.sort(key=lambda s: abs(cell_r.y0 - s["rect"].y1))
+            return hits[0]["text"].strip()
 
         def _slug(label: str, fallback: str) -> str:
             cleaned = "".join(ch.lower() if ch.isalnum() else "_" for ch in label).strip("_")
             while "__" in cleaned:
                 cleaned = cleaned.replace("__", "_")
-            return cleaned[:32] if cleaned else fallback
+            base = cleaned[:40] if cleaned else fallback
+            candidate = base
+            idx = 2
+            while candidate in used_names:
+                suffix = f"_{idx}"
+                candidate = f"{base[:max(1, 40 - len(suffix))]}{suffix}"
+                idx += 1
+            used_names.add(candidate)
+            return candidate
 
-        for d in page.get_drawings():
+        for d in drawings:
             r = pymupdf.Rect(d["rect"])
-            if r.width <= 0 or r.height <= 0:
+            if r.width <= 3 or r.height <= 3:
                 continue
             # Checkbox candidate: small square
             if 8 <= r.width <= 22 and 8 <= r.height <= 22 and abs(r.width - r.height) <= 5:
-                if _overlaps_existing(r):
+                if _overlaps_existing(r) or _text_inside(r):
                     continue
                 lbl = _nearest_label(r)
                 seen_boxes.append(r)
@@ -633,12 +757,73 @@ def detect_form_field_candidates(pdf_bytes: bytes, page_index: int = 0) -> List[
                     "bbox": rect_to_display(page, r),
                     "confidence": 0.85 if lbl else 0.65,
                 })
-            # Text / multiline box candidate
+            # Text / multiline box / table row matrix
             elif 48 <= r.width <= page.rect.width * 0.92 and 12 <= r.height <= 120:
-                if _overlaps_existing(r):
+                if _is_cell_disabled(r):
+                    continue
+                # Check if vertical grid dividers split this row into table cells
+                split_xs = sorted({
+                    round(vx, 2)
+                    for vx, vy0, vy1 in vertical_dividers
+                    if r.x0 + 8 < vx < r.x1 - 8 and vy0 <= r.y0 + 2 and vy1 >= r.y1 - 2
+                })
+                if split_xs:
+                    col_bounds = [r.x0] + split_xs + [r.x1]
+                    row_lbl = _left_row_label(r)
+                    # Find top of table header region
+                    table_top = min(
+                        (vy0 for vx, vy0, vy1 in vertical_dividers if r.x0 - 4 <= vx <= r.x1 + 4 and vy1 >= r.y1 - 2),
+                        default=r.y0 - 30,
+                    )
+                    for cx0, cx1 in zip(col_bounds[:-1], col_bounds[1:]):
+                        cell_r = pymupdf.Rect(cx0, r.y0, cx1, r.y1)
+                        if cell_r.width < 14 or _overlaps_existing(cell_r) or _is_cell_disabled(cell_r):
+                            continue
+                        col_lbl = _col_header_for_cell(cell_r, table_top)
+                        if not col_lbl and _text_inside(cell_r):
+                            continue
+                        if cell_r.width <= 95 and cell_r.height <= 36 and row_lbl and col_lbl:
+                            # Interactive checkbox centered inside matrix cell
+                            cb_w = min(16.0, max(12.0, cell_r.width - 8.0))
+                            cb_h = min(14.0, max(11.0, cell_r.height - 3.0))
+                            mid_x = (cell_r.x0 + cell_r.x1) / 2.0
+                            mid_y = (cell_r.y0 + cell_r.y1) / 2.0
+                            cb_r = pymupdf.Rect(mid_x - cb_w / 2.0, mid_y - cb_h / 2.0, mid_x + cb_w / 2.0, mid_y + cb_h / 2.0)
+                            full_lbl = f"{row_lbl} - {col_lbl}"
+                            seen_boxes.append(cell_r)
+                            candidates.append({
+                                "id": f"cand_{len(candidates) + 1}",
+                                "page_index": page_index,
+                                "field_type": "checkbox",
+                                "field_name": _slug(full_lbl, f"checkbox_{len(candidates) + 1}"),
+                                "label": full_lbl,
+                                "bbox": rect_to_display(page, cb_r),
+                                "confidence": 0.90,
+                            })
+                        elif cell_r.width >= 36:
+                            full_lbl = f"{row_lbl} - {col_lbl}".strip(" -") if (row_lbl or col_lbl) else ""
+                            f_type = "multiline" if cell_r.height >= 38 else "text"
+                            seen_boxes.append(cell_r)
+                            candidates.append({
+                                "id": f"cand_{len(candidates) + 1}",
+                                "page_index": page_index,
+                                "field_type": f_type,
+                                "field_name": _slug(full_lbl, f"field_{len(candidates) + 1}"),
+                                "label": full_lbl or f"Cell {len(candidates) + 1}",
+                                "bbox": rect_to_display(page, cell_r),
+                                "confidence": 0.85 if full_lbl else 0.70,
+                            })
+                    continue
+
+                if _overlaps_existing(r) or _text_inside(r):
                     continue
                 lbl = _nearest_label(r)
-                f_type = "multiline" if r.height >= 38 else "text"
+                lbl_l = lbl.lower()
+                is_multiline = r.height >= 38 or (
+                    r.height >= 28
+                    and any(k in lbl_l for k in ("area", "location", "notes", "comment", "description", "detail", "remark"))
+                )
+                f_type = "multiline" if is_multiline else "text"
                 seen_boxes.append(r)
                 candidates.append({
                     "id": f"cand_{len(candidates) + 1}",
@@ -647,9 +832,12 @@ def detect_form_field_candidates(pdf_bytes: bytes, page_index: int = 0) -> List[
                     "field_name": _slug(lbl, f"field_{len(candidates) + 1}"),
                     "label": lbl or f"Text Field {len(candidates) + 1}",
                     "bbox": rect_to_display(page, r),
-                    "confidence": 0.88 if lbl else 0.70,
+                    "confidence": 0.90 if lbl else 0.70,
                 })
 
+        candidates.sort(key=lambda c: (round(c["bbox"][1] / 8.0), c["bbox"][0]))
+        for idx, c in enumerate(candidates, start=1):
+            c["id"] = f"cand_{idx}"
         return candidates
     finally:
         doc.close()

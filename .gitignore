@@ -38,6 +38,7 @@ squashfs-root/
 # Test runs, coverage & logs
 test_screenshots/
 test_docs/
+tests/output/
 .pytest_cache/
 .coverage
 htmlcov/

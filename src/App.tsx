@@ -3922,7 +3922,167 @@ export default function App() {
                               }}
                             />
                           )}
+                          {mode === 'forms' && selectedField?.xref === fld.xref && activeDoc && (
+                            <>
+                              <div
+                                className="form-widget-move-handle"
+                                title="Drag to move form field"
+                                onMouseDown={(e) => {
+                                  e.stopPropagation();
+                                  e.preventDefault();
+                                  const startX = e.clientX;
+                                  const startY = e.clientY;
+                                  const origBbox = [...fld.bbox] as [number, number, number, number];
+                                  let latestBbox = origBbox;
+                                  const onMove = (mv: MouseEvent) => {
+                                    const dx = (mv.clientX - startX) / zoom;
+                                    const dy = (mv.clientY - startY) / zoom;
+                                    latestBbox = [
+                                      Math.max(0, origBbox[0] + dx),
+                                      Math.max(0, origBbox[1] + dy),
+                                      Math.max(12, origBbox[2] + dx),
+                                      Math.max(12, origBbox[3] + dy),
+                                    ];
+                                    setFormFields((prev) =>
+                                      prev.map((item) => (item.xref === fld.xref ? { ...item, bbox: latestBbox } : item))
+                                    );
+                                    setSelectedField((prev) => (prev?.xref === fld.xref ? { ...prev, bbox: latestBbox } : prev));
+                                  };
+                                  const onUp = async () => {
+                                    window.removeEventListener('mousemove', onMove);
+                                    window.removeEventListener('mouseup', onUp);
+                                    if (
+                                      Math.abs(latestBbox[0] - origBbox[0]) > 0.5 ||
+                                      Math.abs(latestBbox[1] - origBbox[1]) > 0.5
+                                    ) {
+                                      try {
+                                        const res = await pdfApi.updateFormField(activeDoc.doc_id, fld.xref, {
+                                          page_index: fld.page_index,
+                                          bbox: latestBbox,
+                                        });
+                                        await refreshDocState(activeDoc.doc_id, currentPage, res.summary);
+                                        notify(`Moved field '${fld.field_name}'.`);
+                                      } catch (err: any) {
+                                        notify(err?.message || 'Failed to move form field.', 'warn');
+                                      }
+                                    }
+                                  };
+                                  window.addEventListener('mousemove', onMove);
+                                  window.addEventListener('mouseup', onUp);
+                                }}
+                                style={{
+                                  position: 'absolute',
+                                  top: -10,
+                                  left: -2,
+                                  width: 14,
+                                  height: 12,
+                                  background: '#2563eb',
+                                  color: '#fff',
+                                  fontSize: 9,
+                                  lineHeight: '12px',
+                                  textAlign: 'center',
+                                  borderRadius: 2,
+                                  cursor: 'move',
+                                  zIndex: 12,
+                                }}
+                              >
+                                ✥
+                              </div>
+                              <div
+                                className="form-widget-resize-handle"
+                                title="Drag to resize form field"
+                                onMouseDown={(e) => {
+                                  e.stopPropagation();
+                                  e.preventDefault();
+                                  const startX = e.clientX;
+                                  const startY = e.clientY;
+                                  const origBbox = [...fld.bbox] as [number, number, number, number];
+                                  let latestBbox = origBbox;
+                                  const onMove = (mv: MouseEvent) => {
+                                    const dx = (mv.clientX - startX) / zoom;
+                                    const dy = (mv.clientY - startY) / zoom;
+                                    latestBbox = [
+                                      origBbox[0],
+                                      origBbox[1],
+                                      Math.max(origBbox[0] + 14, origBbox[2] + dx),
+                                      Math.max(origBbox[1] + 12, origBbox[3] + dy),
+                                    ];
+                                    setFormFields((prev) =>
+                                      prev.map((item) => (item.xref === fld.xref ? { ...item, bbox: latestBbox } : item))
+                                    );
+                                    setSelectedField((prev) => (prev?.xref === fld.xref ? { ...prev, bbox: latestBbox } : prev));
+                                  };
+                                  const onUp = async () => {
+                                    window.removeEventListener('mousemove', onMove);
+                                    window.removeEventListener('mouseup', onUp);
+                                    if (
+                                      Math.abs(latestBbox[2] - origBbox[2]) > 0.5 ||
+                                      Math.abs(latestBbox[3] - origBbox[3]) > 0.5
+                                    ) {
+                                      try {
+                                        const res = await pdfApi.updateFormField(activeDoc.doc_id, fld.xref, {
+                                          page_index: fld.page_index,
+                                          bbox: latestBbox,
+                                        });
+                                        await refreshDocState(activeDoc.doc_id, currentPage, res.summary);
+                                        notify(`Resized field '${fld.field_name}'.`);
+                                      } catch (err: any) {
+                                        notify(err?.message || 'Failed to resize form field.', 'warn');
+                                      }
+                                    }
+                                  };
+                                  window.addEventListener('mousemove', onMove);
+                                  window.addEventListener('mouseup', onUp);
+                                }}
+                                style={{
+                                  position: 'absolute',
+                                  right: -4,
+                                  bottom: -4,
+                                  width: 10,
+                                  height: 10,
+                                  background: '#2563eb',
+                                  border: '1px solid #fff',
+                                  borderRadius: 2,
+                                  cursor: 'nwse-resize',
+                                  zIndex: 12,
+                                }}
+                              />
+                            </>
+                          )}
                         </div>
+                      );
+                    })}
+
+                {/* Detected Form Field Candidates Overlay */}
+                {mode === 'forms' &&
+                  formCandidates
+                    .filter((c) => c.page_index === currentPage)
+                    .map((cand) => {
+                      const isAccepted = cand.accepted !== false;
+                      return (
+                        <div
+                          key={cand.id}
+                          className={`form-candidate-box ${isAccepted ? 'accepted' : 'rejected'}`}
+                          title={`${cand.field_name} (${cand.field_type}) — Click to ${isAccepted ? 'reject' : 'accept'}`}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setFormCandidates((prev) =>
+                              prev.map((c) => (c.id === cand.id ? { ...c, accepted: !isAccepted } : c))
+                            );
+                          }}
+                          style={{
+                            position: 'absolute',
+                            left: `${cand.bbox[0] * zoom}px`,
+                            top: `${cand.bbox[1] * zoom}px`,
+                            width: `${Math.max(14, (cand.bbox[2] - cand.bbox[0]) * zoom)}px`,
+                            height: `${Math.max(12, (cand.bbox[3] - cand.bbox[1]) * zoom)}px`,
+                            border: isAccepted ? '2px dashed #16a34a' : '2px dashed #94a3b8',
+                            background: isAccepted ? 'rgba(22, 163, 74, 0.14)' : 'rgba(148, 163, 184, 0.10)',
+                            cursor: 'pointer',
+                            zIndex: 9,
+                            boxSizing: 'border-box',
+                          }}
+                        />
                       );
                     })}
 
@@ -5935,7 +6095,7 @@ export default function App() {
                           </label>
                         </div>
                       ))}
-                      <div style={{ display: 'flex', gap: 6, marginTop: 8 }}>
+                      <div style={{ display: 'flex', gap: 6, marginTop: 8, flexWrap: 'wrap' }}>
                         <button
                           className="tool-btn primary"
                           style={{ flex: 1 }}
@@ -5950,6 +6110,8 @@ export default function App() {
                                 bbox: c.bbox,
                                 multiline: c.field_type === 'multiline',
                                 tooltip: c.label,
+                                fill_color_hex: 'transparent',
+                                border_color_hex: 'transparent',
                               });
                               lastSummary = res.summary;
                             }
@@ -5958,10 +6120,35 @@ export default function App() {
                             notify(`Inserted ${selected.length} confirmed form field(s).`);
                           }}
                         >
-                          Confirm & Insert ({formCandidates.filter((c) => c.accepted !== false).length})
+                          Confirm Selected ({formCandidates.filter((c) => c.accepted !== false).length})
+                        </button>
+                        <button
+                          className="tool-btn"
+                          onClick={async () => {
+                            let lastSummary = activeDoc;
+                            for (const c of formCandidates) {
+                              const res = await pdfApi.createFormField(activeDoc.doc_id, {
+                                page_index: c.page_index,
+                                field_type: c.field_type,
+                                field_name: c.field_name,
+                                bbox: c.bbox,
+                                multiline: c.field_type === 'multiline',
+                                tooltip: c.label,
+                                fill_color_hex: 'transparent',
+                                border_color_hex: 'transparent',
+                              });
+                              lastSummary = res.summary;
+                            }
+                            const count = formCandidates.length;
+                            setFormCandidates([]);
+                            await refreshDocState(activeDoc.doc_id, currentPage, lastSummary);
+                            notify(`Accepted and inserted all ${count} detected form field(s).`);
+                          }}
+                        >
+                          Accept All
                         </button>
                         <button className="tool-btn" onClick={() => setFormCandidates([])}>
-                          Dismiss
+                          Cancel
                         </button>
                       </div>
                     </div>
