@@ -5,7 +5,7 @@ from __future__ import annotations
 import datetime
 import hashlib
 import io
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import pikepdf
 import pymupdf
@@ -21,7 +21,7 @@ from pyhanko.sign import signers as pyhanko_signers
 from pyhanko.sign.validation import validate_pdf_signature
 from pyhanko_certvalidator import ValidationContext
 
-from .utils import hex_to_rgb_float, rgb_float_to_hex
+from .utils import hex_to_rgb_float, rect_to_display, rect_to_pdf, rgb_float_to_hex
 
 WIDGET_TYPE_NAMES: Dict[int, str] = {
     pymupdf.PDF_WIDGET_TYPE_TEXT: "text",
@@ -33,6 +33,125 @@ WIDGET_TYPE_NAMES: Dict[int, str] = {
     pymupdf.PDF_WIDGET_TYPE_BUTTON: "button",
 }
 
+ALIGN_TO_Q = {"left": 0, "center": 1, "right": 2}
+Q_TO_ALIGN = {0: "left", 1: "center", 2: "right"}
+
+
+def _detect_xfa_and_acroform(pdf_bytes: bytes) -> Dict[str, Any]:
+    """Inspect PDF catalog for /AcroForm and /XFA without modifying the document."""
+    acroform_present = False
+    is_xfa = False
+    try:
+        with pikepdf.open(io.BytesIO(pdf_bytes)) as pdf:
+            root = pdf.Root
+            if "/AcroForm" in root:
+                acroform_present = True
+                acro = root["/AcroForm"]
+                if hasattr(acro, "get") and "/XFA" in acro:
+                    is_xfa = True
+    except Exception:
+        pass
+    notice = (
+        "This PDF contains an Adobe XFA (XML Forms Architecture) form. "
+        "Dynamic XFA scripts and layouts are proprietary and unsupported; "
+        "any AcroForm fallback fields remain inspectable without altering the XFA stream."
+        if is_xfa
+        else None
+    )
+    return {
+        "acroform_present": acroform_present,
+        "is_xfa": is_xfa,
+        "xfa_notice": notice,
+    }
+
+
+def _read_widget_align(doc: pymupdf.Document, xref: int) -> str:
+    """Read /Q text alignment from widget xref or its parent field."""
+    try:
+        q_type, q_val = doc.xref_get_key(xref, "Q")
+        if q_type == "int":
+            return Q_TO_ALIGN.get(int(q_val), "left")
+        p_type, p_val = doc.xref_get_key(xref, "Parent")
+        if p_type == "xref":
+            p_xref = int(p_val.split()[0])
+            pq_type, pq_val = doc.xref_get_key(p_xref, "Q")
+            if pq_type == "int":
+                return Q_TO_ALIGN.get(int(pq_val), "left")
+    except Exception:
+        pass
+    return "left"
+
+
+def _write_widget_align(doc: pymupdf.Document, xref: int, align: str) -> None:
+    """Write /Q alignment integer (0=left, 1=center, 2=right) to widget xref."""
+    q = ALIGN_TO_Q.get(align.lower().strip(), 0)
+    try:
+        doc.xref_set_key(xref, "Q", str(q))
+    except Exception:
+        pass
+
+
+def _widget_has_appearance(doc: pymupdf.Document, xref: int) -> bool:
+    try:
+        ap_type, _ = doc.xref_get_key(xref, "AP")
+        return ap_type != "null"
+    except Exception:
+        return False
+
+
+def _estimate_text_fit(
+    rect: pymupdf.Rect,
+    text: str,
+    fontsize: float,
+    multiline: bool,
+    fontname: str = "helv",
+    min_fontsize: float = 6.0,
+) -> Dict[str, Any]:
+    """Check whether `text` fits inside `rect` and compute a fitted font size if needed."""
+    avail_w = max(8.0, float(rect.width) - 6.0)
+    avail_h = max(8.0, float(rect.height) - 4.0)
+    try:
+        font_obj = pymupdf.Font(fontname or "helv")
+    except Exception:
+        font_obj = pymupdf.Font("helv")
+
+    def fits_at(sz: float) -> bool:
+        if not text:
+            return True
+        if not multiline:
+            w_pt = font_obj.text_length(text.replace("\n", " "), fontsize=sz)
+            return w_pt <= avail_w and (sz * 1.2) <= avail_h + 4.0
+        words = text.replace("\r\n", "\n").split(" ")
+        lines = 1
+        cur_w = 0.0
+        space_w = font_obj.text_length(" ", fontsize=sz)
+        for idx, tok in enumerate(words):
+            parts = tok.split("\n")
+            for p_i, part in enumerate(parts):
+                if p_i > 0:
+                    lines += 1
+                    cur_w = 0.0
+                pw = font_obj.text_length(part, fontsize=sz)
+                if cur_w > 0 and cur_w + space_w + pw > avail_w:
+                    lines += 1
+                    cur_w = pw
+                else:
+                    cur_w = pw if cur_w == 0 else cur_w + space_w + pw
+        total_h = lines * (sz * 1.25)
+        return total_h <= avail_h + 2.0
+
+    start_sz = float(fontsize) if fontsize and fontsize > 0 else min(12.0, max(min_fontsize, avail_h * 0.65))
+    if fits_at(start_sz):
+        return {"fits": True, "fitted_fontsize": round(start_sz, 1), "overflow": False}
+
+    # Try stepping down to min_fontsize
+    cand = start_sz - 0.5
+    while cand >= min_fontsize:
+        if fits_at(cand):
+            return {"fits": True, "fitted_fontsize": round(cand, 1), "overflow": True}
+        cand -= 0.5
+    return {"fits": False, "fitted_fontsize": min_fontsize, "overflow": True}
+
 
 def list_form_fields(pdf_bytes: bytes, page_index: Optional[int] = None) -> List[Dict[str, Any]]:
     """List all interactive AcroForm fields in the PDF document."""
@@ -42,17 +161,20 @@ def list_form_fields(pdf_bytes: bytes, page_index: Optional[int] = None) -> List
         pages = [page_index] if (page_index is not None and 0 <= page_index < len(doc)) else range(len(doc))
         for p_idx in pages:
             page = doc[p_idx]
-            widgets = page.widgets()
-            if not widgets:
-                continue
-            for w in widgets:
-                rect = w.rect
+            widgets = list(page.widgets() or [])
+            for tab_idx, w in enumerate(widgets):
+                disp_bbox = rect_to_display(page, w.rect)
                 w_type = WIDGET_TYPE_NAMES.get(w.field_type, w.field_type_string.lower())
                 val = w.field_value
-                if w_type == "checkbox":
+                if w_type in ("checkbox", "radiobutton"):
                     is_checked = bool(val and str(val).lower() not in ("off", "false", "0", "no", ""))
                 else:
                     is_checked = False
+                try:
+                    export_val = w.on_state()
+                except Exception:
+                    export_val = None
+                flags = int(w.field_flags or 0)
                 fields_out.append(
                     {
                         "xref": int(w.xref),
@@ -63,19 +185,41 @@ def list_form_fields(pdf_bytes: bytes, page_index: Optional[int] = None) -> List
                         "field_type": w_type,
                         "value": val if val is not None else "",
                         "checked": is_checked,
+                        "export_value": str(export_val) if export_val else "Yes",
                         "choices": list(w.choice_values or []),
-                        "bbox": [round(rect.x0, 2), round(rect.y0, 2), round(rect.x1, 2), round(rect.y1, 2)],
-                        "text_fontsize": round(float(w.text_fontsize or 11.0), 1),
+                        "bbox": disp_bbox,
+                        "text_fontsize": round(float(w.text_fontsize or 0.0), 1),
+                        "text_font": w.text_font or "helv",
                         "text_color": rgb_float_to_hex(tuple(w.text_color or (0, 0, 0))),
                         "fill_color": rgb_float_to_hex(tuple(w.fill_color)) if w.fill_color else None,
                         "border_color": rgb_float_to_hex(tuple(w.border_color)) if w.border_color else None,
                         "is_signed": bool(getattr(w, "is_signed", False)),
-                        "read_only": bool(w.field_flags & pymupdf.PDF_FIELD_IS_READ_ONLY),
+                        "read_only": bool(flags & pymupdf.PDF_FIELD_IS_READ_ONLY),
+                        "required": bool(flags & pymupdf.PDF_FIELD_IS_REQUIRED),
+                        "multiline": bool(flags & pymupdf.PDF_TX_FIELD_IS_MULTILINE),
+                        "password_field": bool(flags & pymupdf.PDF_TX_FIELD_IS_PASSWORD),
+                        "text_maxlen": int(getattr(w, "text_maxlen", 0) or 0),
+                        "align": _read_widget_align(doc, int(w.xref)),
+                        "tab_order": tab_idx,
+                        "has_appearance": _widget_has_appearance(doc, int(w.xref)),
                     }
                 )
         return fields_out
     finally:
         doc.close()
+
+
+def inspect_form_fields(pdf_bytes: bytes, page_index: Optional[int] = None) -> Dict[str, Any]:
+    """Return full AcroForm/XFA inspection report and typed field definitions."""
+    meta = _detect_xfa_and_acroform(pdf_bytes)
+    fields = list_form_fields(pdf_bytes, page_index=page_index)
+    return {
+        "acroform_present": meta["acroform_present"] or len(fields) > 0,
+        "is_xfa": meta["is_xfa"],
+        "xfa_notice": meta["xfa_notice"],
+        "field_count": len(fields),
+        "fields": fields,
+    }
 
 
 def create_form_field(
@@ -92,16 +236,21 @@ def create_form_field(
     fill_color_hex: str = "#f8fafc",
     border_color_hex: str = "#475569",
     read_only: bool = False,
+    required: bool = False,
+    multiline: bool = False,
+    max_length: int = 0,
+    align: str = "left",
+    font_name: str = "helv",
     tooltip: str = "",
 ) -> bytes:
-    """Create a new interactive AcroForm field (text, checkbox, radiobutton, dropdown, signature)."""
+    """Create a new interactive AcroForm field (text, multiline, checkbox, radiobutton, dropdown, listbox, signature)."""
     doc = pymupdf.open(stream=pdf_bytes, filetype="pdf")
     try:
         page = doc[page_index]
-        rect = pymupdf.Rect(bbox)
-        if rect.width < 14:
+        rect = pymupdf.Rect(rect_to_pdf(page, bbox))
+        if rect.width < 12:
             rect.x1 = rect.x0 + 140
-        if rect.height < 14:
+        if rect.height < 12:
             rect.y1 = rect.y0 + 24
 
         widget = pymupdf.Widget()
@@ -109,17 +258,22 @@ def create_form_field(
         widget.field_name = field_name.strip() or f"Field_{page_index}_{int(rect.x0)}_{int(rect.y0)}"
         widget.field_label = tooltip or widget.field_name
         widget.text_fontsize = float(font_size)
+        widget.text_font = font_name or "helv"
         widget.text_color = list(hex_to_rgb_float(text_color_hex))
-        if fill_color_hex:
+        if fill_color_hex and fill_color_hex.lower() != "transparent":
             widget.fill_color = list(hex_to_rgb_float(fill_color_hex))
-        if border_color_hex:
+        if border_color_hex and border_color_hex.lower() != "transparent":
             widget.border_color = list(hex_to_rgb_float(border_color_hex))
         widget.border_width = 1.0
 
         kind = field_type.lower().strip()
-        if kind == "text":
+        if kind in ("text", "multiline"):
             widget.field_type = pymupdf.PDF_WIDGET_TYPE_TEXT
             widget.field_value = default_value
+            if kind == "multiline" or multiline:
+                widget.field_flags |= pymupdf.PDF_TX_FIELD_IS_MULTILINE
+            if max_length and int(max_length) > 0:
+                widget.text_maxlen = int(max_length)
         elif kind == "checkbox":
             widget.field_type = pymupdf.PDF_WIDGET_TYPE_CHECKBOX
             widget.field_value = True if checked or str(default_value).lower() in ("true", "yes", "1", "on") else False
@@ -132,6 +286,11 @@ def create_form_field(
             widget.choice_values = opts
             widget.field_value = default_value if default_value in opts else (opts[0] if opts else "")
             widget.field_flags = pymupdf.PDF_CH_FIELD_IS_COMBO | pymupdf.PDF_CH_FIELD_IS_EDIT
+        elif kind == "listbox":
+            widget.field_type = pymupdf.PDF_WIDGET_TYPE_LISTBOX
+            opts = [c.strip() for c in (choices or ["Option 1", "Option 2", "Option 3"]) if c.strip()]
+            widget.choice_values = opts
+            widget.field_value = default_value if default_value in opts else (opts[0] if opts else "")
         elif kind == "signature":
             widget.field_type = pymupdf.PDF_WIDGET_TYPE_SIGNATURE
         else:
@@ -139,9 +298,104 @@ def create_form_field(
 
         if read_only:
             widget.field_flags |= pymupdf.PDF_FIELD_IS_READ_ONLY
+        if required:
+            widget.field_flags |= pymupdf.PDF_FIELD_IS_REQUIRED
 
-        page.add_widget(widget)
+        annot = page.add_widget(widget)
+        if kind in ("text", "multiline") and annot is not None:
+            _write_widget_align(doc, int(annot.xref), align)
         return doc.tobytes(garbage=2, deflate=True)
+    finally:
+        doc.close()
+
+
+def fill_form_fields_with_report(
+    pdf_bytes: bytes,
+    values: Dict[str, Any],
+    page_index: Optional[int] = None,
+    auto_fit: bool = True,
+) -> Dict[str, Any]:
+    """Fill AcroForm fields, enforce max length / text fitting, and return updated bytes + warnings."""
+    doc = pymupdf.open(stream=pdf_bytes, filetype="pdf")
+    warnings: List[Dict[str, Any]] = []
+    try:
+        pages = [page_index] if (page_index is not None and 0 <= page_index < len(doc)) else range(len(doc))
+        for p_idx in pages:
+            page = doc[p_idx]
+            for w in page.widgets() or []:
+                key_name = w.field_name
+                key_xref = str(w.xref)
+                if key_name not in values and key_xref not in values:
+                    continue
+                if bool(w.field_flags & pymupdf.PDF_FIELD_IS_READ_ONLY):
+                    warnings.append({
+                        "field_name": key_name,
+                        "xref": int(w.xref),
+                        "code": "read_only",
+                        "message": f"Field '{key_name}' is read-only and was not modified.",
+                    })
+                    continue
+
+                new_val = values[key_xref] if key_xref in values else values[key_name]
+                if w.field_type == pymupdf.PDF_WIDGET_TYPE_CHECKBOX:
+                    if isinstance(new_val, bool):
+                        w.field_value = new_val
+                    else:
+                        w.field_value = str(new_val).lower() in ("true", "1", "yes", "on")
+                elif w.field_type == pymupdf.PDF_WIDGET_TYPE_RADIOBUTTON:
+                    try:
+                        on_val = str(w.on_state() or "Yes")
+                    except Exception:
+                        on_val = "Yes"
+                    if isinstance(new_val, bool):
+                        w.field_value = new_val
+                    elif str(new_val).lower() in ("true", "1", "yes", "on") or str(new_val) == on_val:
+                        w.field_value = True
+                    else:
+                        w.field_value = False
+                elif w.field_type == pymupdf.PDF_WIDGET_TYPE_TEXT:
+                    txt = str(new_val if new_val is not None else "")
+                    maxlen = int(getattr(w, "text_maxlen", 0) or 0)
+                    if maxlen > 0 and len(txt) > maxlen:
+                        warnings.append({
+                            "field_name": key_name,
+                            "xref": int(w.xref),
+                            "code": "max_length_exceeded",
+                            "message": f"Field '{key_name}' truncated from {len(txt)} to {maxlen} characters (MaxLen={maxlen}).",
+                        })
+                        txt = txt[:maxlen]
+                    is_ml = bool(w.field_flags & pymupdf.PDF_TX_FIELD_IS_MULTILINE)
+                    orig_sz = float(w.text_fontsize or 0.0)
+                    fit = _estimate_text_fit(
+                        w.rect,
+                        txt,
+                        orig_sz,
+                        multiline=is_ml,
+                        fontname=w.text_font or "helv",
+                    )
+                    if fit["overflow"]:
+                        if (orig_sz == 0.0 or auto_fit) and fit["fits"]:
+                            w.text_fontsize = fit["fitted_fontsize"]
+                            warnings.append({
+                                "field_name": key_name,
+                                "xref": int(w.xref),
+                                "code": "auto_fitted",
+                                "message": f"Field '{key_name}' font size auto-fitted to {fit['fitted_fontsize']} pt to prevent clipping.",
+                            })
+                        elif not fit["fits"]:
+                            if orig_sz == 0.0 or auto_fit:
+                                w.text_fontsize = fit["fitted_fontsize"]
+                            warnings.append({
+                                "field_name": key_name,
+                                "xref": int(w.xref),
+                                "code": "text_overflow",
+                                "message": f"Text in field '{key_name}' exceeds field bounds even at {fit['fitted_fontsize']} pt.",
+                            })
+                    w.field_value = txt
+                else:
+                    w.field_value = str(new_val if new_val is not None else "")
+                w.update()
+        return {"pdf_bytes": doc.tobytes(garbage=2, deflate=True), "warnings": warnings}
     finally:
         doc.close()
 
@@ -152,27 +406,7 @@ def fill_form_fields(
     page_index: Optional[int] = None,
 ) -> bytes:
     """Fill one or more AcroForm fields by `field_name` (or `xref` string) and update appearances."""
-    doc = pymupdf.open(stream=pdf_bytes, filetype="pdf")
-    try:
-        pages = [page_index] if (page_index is not None and 0 <= page_index < len(doc)) else range(len(doc))
-        for p_idx in pages:
-            page = doc[p_idx]
-            for w in page.widgets() or []:
-                key_name = w.field_name
-                key_xref = str(w.xref)
-                if key_name in values or key_xref in values:
-                    new_val = values[key_name] if key_name in values else values[key_xref]
-                    if w.field_type in (pymupdf.PDF_WIDGET_TYPE_CHECKBOX, pymupdf.PDF_WIDGET_TYPE_RADIOBUTTON):
-                        if isinstance(new_val, bool):
-                            w.field_value = new_val
-                        else:
-                            w.field_value = str(new_val).lower() in ("true", "1", "yes", "on")
-                    else:
-                        w.field_value = str(new_val)
-                    w.update()
-        return doc.tobytes(garbage=2, deflate=True)
-    finally:
-        doc.close()
+    return fill_form_fields_with_report(pdf_bytes, values=values, page_index=page_index)["pdf_bytes"]
 
 
 def update_form_field(
@@ -184,9 +418,16 @@ def update_form_field(
     bbox: Optional[List[float]] = None,
     choices: Optional[List[str]] = None,
     read_only: Optional[bool] = None,
+    required: Optional[bool] = None,
+    multiline: Optional[bool] = None,
+    max_length: Optional[int] = None,
+    align: Optional[str] = None,
+    font_name: Optional[str] = None,
     text_color_hex: Optional[str] = None,
     fill_color_hex: Optional[str] = None,
+    border_color_hex: Optional[str] = None,
     font_size: Optional[float] = None,
+    tooltip: Optional[str] = None,
 ) -> bytes:
     """Update properties or value of an existing AcroForm field widget."""
     doc = pymupdf.open(stream=pdf_bytes, filetype="pdf")
@@ -196,21 +437,44 @@ def update_form_field(
             if int(w.xref) == int(xref):
                 if field_name is not None:
                     w.field_name = field_name
+                if tooltip is not None:
+                    w.field_label = tooltip
                 if bbox and len(bbox) == 4:
-                    w.rect = pymupdf.Rect(bbox)
-                if choices is not None and w.field_type == pymupdf.PDF_WIDGET_TYPE_COMBOBOX:
+                    w.rect = pymupdf.Rect(rect_to_pdf(page, bbox))
+                if choices is not None and w.field_type in (
+                    pymupdf.PDF_WIDGET_TYPE_COMBOBOX,
+                    pymupdf.PDF_WIDGET_TYPE_LISTBOX,
+                ):
                     w.choice_values = choices
+                if font_name:
+                    w.text_font = font_name
                 if text_color_hex:
                     w.text_color = list(hex_to_rgb_float(text_color_hex))
                 if fill_color_hex:
                     w.fill_color = list(hex_to_rgb_float(fill_color_hex))
+                if border_color_hex:
+                    w.border_color = list(hex_to_rgb_float(border_color_hex))
                 if font_size is not None:
                     w.text_fontsize = float(font_size)
+                if max_length is not None and w.field_type == pymupdf.PDF_WIDGET_TYPE_TEXT:
+                    w.text_maxlen = max(0, int(max_length))
+                target_flags = int(w.field_flags or 0)
                 if read_only is not None:
                     if read_only:
-                        w.field_flags |= pymupdf.PDF_FIELD_IS_READ_ONLY
+                        target_flags |= pymupdf.PDF_FIELD_IS_READ_ONLY
                     else:
-                        w.field_flags &= ~pymupdf.PDF_FIELD_IS_READ_ONLY
+                        target_flags &= ~pymupdf.PDF_FIELD_IS_READ_ONLY
+                if required is not None:
+                    if required:
+                        target_flags |= pymupdf.PDF_FIELD_IS_REQUIRED
+                    else:
+                        target_flags &= ~pymupdf.PDF_FIELD_IS_REQUIRED
+                if multiline is not None and w.field_type == pymupdf.PDF_WIDGET_TYPE_TEXT:
+                    if multiline:
+                        target_flags |= pymupdf.PDF_TX_FIELD_IS_MULTILINE
+                    else:
+                        target_flags &= ~pymupdf.PDF_TX_FIELD_IS_MULTILINE
+                w.field_flags = target_flags
                 if value is not None:
                     if w.field_type in (pymupdf.PDF_WIDGET_TYPE_CHECKBOX, pymupdf.PDF_WIDGET_TYPE_RADIOBUTTON):
                         w.field_value = (
@@ -219,8 +483,174 @@ def update_form_field(
                     else:
                         w.field_value = str(value)
                 w.update()
+                doc.xref_set_key(int(w.xref), "Ff", str(target_flags))
+                if align is not None and w.field_type == pymupdf.PDF_WIDGET_TYPE_TEXT:
+                    _write_widget_align(doc, int(w.xref), align)
                 break
         return doc.tobytes(garbage=2, deflate=True)
+    finally:
+        doc.close()
+
+
+def duplicate_form_field(pdf_bytes: bytes, page_index: int, xref: int, offset_pt: float = 18.0) -> bytes:
+    """Duplicate an existing AcroForm widget on the same page with a unique name."""
+    fields = list_form_fields(pdf_bytes, page_index=page_index)
+    target = next((f for f in fields if int(f["xref"]) == int(xref)), None)
+    if target is None:
+        raise KeyError(f"Form field xref {xref} not found on page {page_index}")
+    x0, y0, x1, y1 = target["bbox"]
+    new_bbox = [x0 + offset_pt, y0 + offset_pt, x1 + offset_pt, y1 + offset_pt]
+    existing_names = {f["field_name"] for f in list_form_fields(pdf_bytes)}
+    base_name = f"{target['field_name']}_copy"
+    cand = base_name
+    idx = 2
+    while cand in existing_names:
+        cand = f"{base_name}_{idx}"
+        idx += 1
+    return create_form_field(
+        pdf_bytes=pdf_bytes,
+        page_index=page_index,
+        field_type=target["field_type"],
+        field_name=cand,
+        bbox=new_bbox,
+        default_value=str(target.get("value") or ""),
+        checked=bool(target.get("checked")),
+        choices=target.get("choices") or None,
+        font_size=float(target.get("text_fontsize") or 11.0),
+        text_color_hex=target.get("text_color") or "#000000",
+        fill_color_hex=target.get("fill_color") or "#f8fafc",
+        border_color_hex=target.get("border_color") or "#475569",
+        read_only=bool(target.get("read_only")),
+        required=bool(target.get("required")),
+        multiline=bool(target.get("multiline")),
+        max_length=int(target.get("text_maxlen") or 0),
+        align=str(target.get("align") or "left"),
+        font_name=str(target.get("text_font") or "helv"),
+        tooltip=str(target.get("field_label") or cand),
+    )
+
+
+def reorder_form_tab_order(pdf_bytes: bytes, page_index: int, ordered_xrefs: List[int]) -> bytes:
+    """Reorder widget annotations in a page's /Annots array to control Tab order."""
+    with pikepdf.open(io.BytesIO(pdf_bytes)) as pdf:
+        page = pdf.pages[page_index]
+        if "/Annots" not in page:
+            return pdf_bytes
+        annots = list(page["/Annots"])
+        widget_map: Dict[int, Any] = {}
+        non_widgets: List[Tuple[int, Any]] = []
+        for idx, annot in enumerate(annots):
+            objgen = getattr(annot, "objgen", None)
+            xref_num = int(objgen[0]) if objgen else -1
+            is_widget = hasattr(annot, "get") and annot.get("/Subtype") == pikepdf.Name("/Widget")
+            if is_widget and xref_num > 0:
+                widget_map[xref_num] = annot
+            else:
+                non_widgets.append((idx, annot))
+
+        reordered_widgets: List[Any] = []
+        seen = set()
+        for xr in ordered_xrefs:
+            if int(xr) in widget_map and int(xr) not in seen:
+                reordered_widgets.append(widget_map[int(xr)])
+                seen.add(int(xr))
+        for xr, annot in widget_map.items():
+            if xr not in seen:
+                reordered_widgets.append(annot)
+
+        new_annots: List[Any] = [a for _, a in non_widgets] + reordered_widgets
+        page["/Annots"] = pikepdf.Array(new_annots)
+        out = io.BytesIO()
+        pdf.save(out)
+        return out.getvalue()
+
+
+def detect_form_field_candidates(pdf_bytes: bytes, page_index: int = 0) -> List[Dict[str, Any]]:
+    """Heuristically suggest AcroForm fields from static rectangles/lines without altering the PDF."""
+    doc = pymupdf.open(stream=pdf_bytes, filetype="pdf")
+    try:
+        page = doc[page_index]
+        existing_rects = [w.rect for w in (page.widgets() or [])]
+        text_spans: List[Dict[str, Any]] = []
+        tdict = page.get_text("dict")
+        for blk in tdict.get("blocks", []):
+            if blk.get("type") != 0:
+                continue
+            for ln in blk.get("lines", []):
+                txt = "".join(sp.get("text", "") for sp in ln.get("spans", [])).strip()
+                if txt:
+                    text_spans.append({"text": txt, "rect": pymupdf.Rect(ln["bbox"])})
+
+        candidates: List[Dict[str, Any]] = []
+        seen_boxes: List[pymupdf.Rect] = []
+
+        def _overlaps_existing(r: pymupdf.Rect) -> bool:
+            for ex in existing_rects + seen_boxes:
+                inter = r & ex
+                if not inter.is_empty and inter.get_area() > 0.35 * min(r.get_area(), ex.get_area()):
+                    return True
+            return False
+
+        def _nearest_label(r: pymupdf.Rect) -> str:
+            best_txt = ""
+            best_dist = 180.0
+            for sp in text_spans:
+                sr = sp["rect"]
+                # Prefer label directly to the left on same row, or directly above
+                if abs((sr.y0 + sr.y1) / 2 - (r.y0 + r.y1) / 2) <= 16 and sr.x1 <= r.x0 + 8:
+                    dist = max(0.0, r.x0 - sr.x1)
+                elif 0 <= r.y0 - sr.y1 <= 22 and abs(sr.x0 - r.x0) <= 60:
+                    dist = (r.y0 - sr.y1) + 12.0
+                else:
+                    continue
+                if dist < best_dist:
+                    best_dist = dist
+                    best_txt = sp["text"]
+            return best_txt
+
+        def _slug(label: str, fallback: str) -> str:
+            cleaned = "".join(ch.lower() if ch.isalnum() else "_" for ch in label).strip("_")
+            while "__" in cleaned:
+                cleaned = cleaned.replace("__", "_")
+            return cleaned[:32] if cleaned else fallback
+
+        for d in page.get_drawings():
+            r = pymupdf.Rect(d["rect"])
+            if r.width <= 0 or r.height <= 0:
+                continue
+            # Checkbox candidate: small square
+            if 8 <= r.width <= 22 and 8 <= r.height <= 22 and abs(r.width - r.height) <= 5:
+                if _overlaps_existing(r):
+                    continue
+                lbl = _nearest_label(r)
+                seen_boxes.append(r)
+                candidates.append({
+                    "id": f"cand_{len(candidates) + 1}",
+                    "page_index": page_index,
+                    "field_type": "checkbox",
+                    "field_name": _slug(lbl, f"checkbox_{len(candidates) + 1}"),
+                    "label": lbl or f"Checkbox {len(candidates) + 1}",
+                    "bbox": rect_to_display(page, r),
+                    "confidence": 0.85 if lbl else 0.65,
+                })
+            # Text / multiline box candidate
+            elif 48 <= r.width <= page.rect.width * 0.92 and 12 <= r.height <= 120:
+                if _overlaps_existing(r):
+                    continue
+                lbl = _nearest_label(r)
+                f_type = "multiline" if r.height >= 38 else "text"
+                seen_boxes.append(r)
+                candidates.append({
+                    "id": f"cand_{len(candidates) + 1}",
+                    "page_index": page_index,
+                    "field_type": f_type,
+                    "field_name": _slug(lbl, f"field_{len(candidates) + 1}"),
+                    "label": lbl or f"Text Field {len(candidates) + 1}",
+                    "bbox": rect_to_display(page, r),
+                    "confidence": 0.88 if lbl else 0.70,
+                })
+
+        return candidates
     finally:
         doc.close()
 

@@ -274,14 +274,58 @@ export interface FormFieldItem {
   field_type: 'text' | 'checkbox' | 'radiobutton' | 'dropdown' | 'listbox' | 'signature' | string;
   value: string | boolean;
   checked: boolean;
+  export_value?: string;
   choices: string[];
   bbox: [number, number, number, number];
   text_fontsize: number;
+  text_font?: string;
   text_color: string;
   fill_color: string | null;
   border_color: string | null;
   is_signed: boolean;
   read_only: boolean;
+  required?: boolean;
+  multiline?: boolean;
+  password_field?: boolean;
+  text_maxlen?: number;
+  align?: 'left' | 'center' | 'right' | string;
+  tab_order?: number;
+  has_appearance?: boolean;
+}
+
+export interface FormInspectionReport {
+  acroform_present: boolean;
+  is_xfa: boolean;
+  xfa_notice: string | null;
+  field_count: number;
+  fields: FormFieldItem[];
+}
+
+export interface FormFieldCandidate {
+  id: string;
+  page_index: number;
+  field_type: 'text' | 'multiline' | 'checkbox' | string;
+  field_name: string;
+  label: string;
+  bbox: [number, number, number, number];
+  confidence: number;
+  accepted?: boolean;
+}
+
+export interface FormFillWarning {
+  field_name: string;
+  xref: number;
+  code: 'read_only' | 'max_length_exceeded' | 'auto_fitted' | 'text_overflow' | string;
+  message: string;
+}
+
+export interface TextBoxDefaults {
+  color: string;
+  font: string;
+  size: number;
+  align: 'left' | 'center' | 'right' | 'justify';
+  bg_hex: string; // 'transparent' or '#rrggbb'
+  border_hex: string; // 'transparent' or '#rrggbb'
 }
 
 export interface BookmarkItem {

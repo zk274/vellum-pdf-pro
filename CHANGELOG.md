@@ -8,6 +8,14 @@ The project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html
 ## [Unreleased]
 
 ### Added
+- **Interactive PDF Forms (Fill & Authoring / Prepare Form)**:
+  - Full AcroForm inspection (`GET /api/docs/{doc_id}/forms/inspect`) supporting single-line text, multiline text, checkboxes, grouped radio buttons, dropdowns, list boxes, and signature placeholders while keeping static PDF vector graphics separate.
+  - Non-destructive XFA detection (`is_xfa` flag and UI notice banner) without corrupting XFA packets.
+  - Direct on-canvas form filling with `Tab` / `Shift+Tab` keyboard navigation, `max_length` enforcement, optional auto-fit text scaling (down to 6 pt), and structured overflow/read-only warnings.
+  - Prepare Form authoring suite: create, edit properties (`required`, `read_only`, `multiline`, `max_length`, `align`, `choices`, `bbox`), duplicate, delete, reorder tab order per page, and review non-mutating Form Field Detection Assistant candidates (`POST /api/docs/{doc_id}/forms/detect-candidates`).
+- **Default Text Box Appearance & Persistent Preferences**:
+  - Standardized factory defaults for new text boxes: pure black (`#000000`), Helvetica (`helv`), `11 pt`, `left` aligned, transparent background, and no border — isolated from UI selection overlays across Dark and Light themes.
+  - Added Inspector **Background**, **Border**, **Save as Default**, and **Reset Defaults** controls persisted in `localStorage` (`vellum.textbox.defaults.v1`).
 - **Mixed-Format PDF Text Editing & Per-Run Style Preservation**:
   - Enhanced `inspect_page_objects()` and `_build_paragraph_blocks()` in `backend/engine/direct_edit.py` to extract ordered `runs` (`text`, `font`, `family`, `size`, `color`, `bold`, `italic`, `is_embedded_font`, `is_subset_font`, `char_spacing`, `baseline`, `link_uri`) matching `reflow_text` 1:1.
   - Added mixed-style word/character wrapping (`_resolve_run_font_and_metrics`, `_wrap_mixed_runs`), proportional `shrink_font` scaling across heterogeneous runs, per-run original font encoding checks with `font_warnings` and `font_fallback_policy` (`"warn_and_fallback"` | `"refuse"`), and per-run `/Link` URI restoration in `edit_paragraph_block()` and `POST /api/docs/{doc_id}/pages/{page_index}/edit-paragraph`.

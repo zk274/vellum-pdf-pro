@@ -325,6 +325,13 @@ export const pdfApi = {
 
   // Forms & Signatures
   listFormFields: (docId: string) => requestJson<FormFieldItem[]>(`/api/docs/${docId}/forms`),
+  inspectFormFields: (docId: string) =>
+    requestJson<import('./types').FormInspectionReport>(`/api/docs/${docId}/forms/inspect`),
+  detectFormCandidates: (docId: string, pageIndex: number) =>
+    requestJson<{ page_index: number; candidates: import('./types').FormFieldCandidate[] }>(
+      `/api/docs/${docId}/forms/detect-candidates?page_index=${pageIndex}`,
+      { method: 'POST' }
+    ),
   createFormField: (docId: string, payload: any) =>
     requestJson<{ summary: DocumentSummary; fields: FormFieldItem[] }>(
       `/api/docs/${docId}/forms/create`,
@@ -333,12 +340,29 @@ export const pdfApi = {
         body: JSON.stringify(payload),
       }
     ),
-  fillFormFields: (docId: string, values: Record<string, any>, page_index?: number) =>
-    requestJson<{ summary: DocumentSummary; fields: FormFieldItem[] }>(
+  fillFormFields: (docId: string, values: Record<string, any>, page_index?: number, auto_fit = true) =>
+    requestJson<{
+      summary: DocumentSummary;
+      fields: FormFieldItem[];
+      warnings?: import('./types').FormFillWarning[];
+    }>(
       `/api/docs/${docId}/forms/fill`,
       {
         method: 'POST',
-        body: JSON.stringify({ values, page_index }),
+        body: JSON.stringify({ values, page_index, auto_fit }),
+      }
+    ),
+  duplicateFormField: (docId: string, xref: number, pageIndex: number) =>
+    requestJson<{ summary: DocumentSummary; fields: FormFieldItem[] }>(
+      `/api/docs/${docId}/forms/${xref}/duplicate?page_index=${pageIndex}`,
+      { method: 'POST' }
+    ),
+  reorderFormTabOrder: (docId: string, page_index: number, ordered_xrefs: number[]) =>
+    requestJson<{ summary: DocumentSummary; fields: FormFieldItem[] }>(
+      `/api/docs/${docId}/forms/tab-order`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ page_index, ordered_xrefs }),
       }
     ),
   updateFormField: (docId: string, xref: number, payload: any) =>

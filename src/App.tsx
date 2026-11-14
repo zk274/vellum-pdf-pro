@@ -68,13 +68,17 @@ import {
   DocumentSummary,
   EditorMode,
   FontItem,
+  FormFieldCandidate,
   FormFieldItem,
+  FormFillWarning,
+  FormInspectionReport,
   ImageObject,
   LeftSidebarTab,
   PageObjectsData,
   ParagraphOverflowInfo,
   PreflightReport,
   SignatureVerificationReport,
+  TextBoxDefaults,
   TextBlockObject,
   TextRun,
   TextSpanObject,
@@ -112,13 +116,45 @@ type SubTool =
   | 'ink'
   | 'stamp'
   | 'form-text'
+  | 'form-multiline'
   | 'form-checkbox'
   | 'form-radio'
   | 'form-dropdown'
+  | 'form-listbox'
   | 'form-signature'
   | 'sig-visual'
   | 'sig-crypto'
   | 'redact-box';
+
+const TEXTBOX_DEFAULTS_STORAGE_KEY = 'vellum.textbox.defaults.v1';
+const FACTORY_TEXTBOX_DEFAULTS: TextBoxDefaults = {
+  color: '#000000',
+  font: 'helv',
+  size: 11,
+  align: 'left',
+  bg_hex: 'transparent',
+  border_hex: 'transparent',
+};
+
+function loadTextBoxDefaults(): TextBoxDefaults {
+  try {
+    const raw = window.localStorage.getItem(TEXTBOX_DEFAULTS_STORAGE_KEY);
+    if (!raw) return { ...FACTORY_TEXTBOX_DEFAULTS };
+    const parsed = JSON.parse(raw);
+    return {
+      color: typeof parsed.color === 'string' ? parsed.color : FACTORY_TEXTBOX_DEFAULTS.color,
+      font: typeof parsed.font === 'string' ? parsed.font : FACTORY_TEXTBOX_DEFAULTS.font,
+      size: typeof parsed.size === 'number' && parsed.size >= 6 ? parsed.size : FACTORY_TEXTBOX_DEFAULTS.size,
+      align: ['left', 'center', 'right', 'justify'].includes(parsed.align)
+        ? parsed.align
+        : FACTORY_TEXTBOX_DEFAULTS.align,
+      bg_hex: typeof parsed.bg_hex === 'string' ? parsed.bg_hex : FACTORY_TEXTBOX_DEFAULTS.bg_hex,
+      border_hex: typeof parsed.border_hex === 'string' ? parsed.border_hex : FACTORY_TEXTBOX_DEFAULTS.border_hex,
+    };
+  } catch {
+    return { ...FACTORY_TEXTBOX_DEFAULTS };
+  }
+}
 
 interface DraftTextBoxState {
   bbox: [number, number, number, number];
@@ -129,6 +165,8 @@ interface DraftTextBoxState {
   bold: boolean;
   italic: boolean;
   align: 'left' | 'center' | 'right' | 'justify';
+  bg_hex?: string;
+  border_hex?: string;
   editingExistingId?: string;
 }
 
@@ -281,10 +319,23 @@ export default function App() {
   const [toolCommentText, setToolCommentText] = useState<string>('Review note');
   const [newBookmarkTitle, setNewBookmarkTitle] = useState<string>('');
 
-  // Form Designer config
+  // Form Designer & Fill config
   const [newFieldName, setNewFieldName] = useState<string>('custom_field_1');
   const [newFieldDefault, setNewFieldDefault] = useState<string>('');
   const [newFieldChoices, setNewFieldChoices] = useState<string>('Option A, Option B, Option C');
+  const [newFieldRequired, setNewFieldRequired] = useState<boolean>(false);
+  const [newFieldReadOnly, setNewFieldReadOnly] = useState<boolean>(false);
+  const [newFieldMultiline, setNewFieldMultiline] = useState<boolean>(false);
+  const [newFieldMaxLen, setNewFieldMaxLen] = useState<number>(0);
+  const [newFieldAlign, setNewFieldAlign] = useState<'left' | 'center' | 'right'>('left');
+  const [formInspection, setFormInspection] = useState<FormInspectionReport | null>(null);
+  const [formCandidates, setFormCandidates] = useState<FormFieldCandidate[]>([]);
+  const [formFillWarnings, setFormFillWarnings] = useState<FormFillWarning[]>([]);
+  const [formAutoFit, setFormAutoFit] = useState<boolean>(true);
+  const formWidgetRefs = useRef<Record<number, HTMLElement | null>>({});
+
+  // Persistent Text Box Defaults (Black, Helvetica 11pt, Left, Transparent BG, No Border)
+  const [textBoxDefaults, setTextBoxDefaults] = useState<TextBoxDefaults>(() => loadTextBoxDefaults());
 
   // Signature config
   const [signerName, setSignerName] = useState<string>('Alice Vance');
@@ -429,6 +480,30 @@ export default function App() {
     document.documentElement.setAttribute('data-theme', theme);
   }, [theme]);
 
+  const saveTextBoxDefaults = useCallback(
+    (next: TextBoxDefaults) => {
+      setTextBoxDefaults(next);
+      try {
+        window.localStorage.setItem(TEXTBOX_DEFAULTS_STORAGE_KEY, JSON.stringify(next));
+      } catch {
+        // ignore storage quota errors
+      }
+      notify('Saved default text box appearance preferences.');
+    },
+    [notify]
+  );
+
+  const resetTextBoxDefaults = useCallback(() => {
+    const factory = { ...FACTORY_TEXTBOX_DEFAULTS };
+    setTextBoxDefaults(factory);
+    try {
+      window.localStorage.setItem(TEXTBOX_DEFAULTS_STORAGE_KEY, JSON.stringify(factory));
+    } catch {
+      // ignore
+    }
+    notify('Reset text box defaults to Black (#000000), Helvetica 11pt, Left, Transparent.');
+  }, [notify]);
+
   const refreshDocState = useCallback(
     async (docId: string, pageIdx: number, summaryOverride?: DocumentSummary) => {
       try {
@@ -441,24 +516,39 @@ export default function App() {
         const safePage = Math.max(0, Math.min(pageIdx, summary.page_count - 1));
         if (safePage !== pageIdx) setCurrentPage(safePage);
 
-        const [renderRes, objsRes, annotsRes, fieldsRes, thumbsRes, bmRes, attRes] = await Promise.all([
+        const [renderRes, objsRes, annotsRes, inspectRes, thumbsRes, bmRes, attRes] = await Promise.all([
           pdfApi.renderPage(docId, safePage, Math.round(110 * Math.max(1, zoom))),
           pdfApi.getPageObjects(docId, safePage),
           pdfApi.listAnnotations(docId),
-          pdfApi.listFormFields(docId),
+          pdfApi.inspectFormFields(docId),
           pdfApi.getThumbnails(docId, 52),
           pdfApi.getBookmarks(docId),
           pdfApi.listAttachments(docId),
         ]);
 
+        const fieldsRes = inspectRes.fields || [];
         setPageBitmap(`data:image/png;base64,${renderRes.image_base64}`);
         setPageSizePt({ width: renderRes.width_pt, height: renderRes.height_pt });
         setPageObjects(objsRes);
         setAnnotations(annotsRes);
+        setFormInspection(inspectRes);
         setFormFields(fieldsRes);
         const draftMap: Record<string, any> = {};
         fieldsRes.forEach((f) => {
-          draftMap[f.field_name] = f.field_type === 'checkbox' ? f.checked : f.value;
+          if (f.field_type === 'checkbox') {
+            draftMap[f.field_name] = f.checked;
+            draftMap[String(f.xref)] = f.checked;
+          } else if (f.field_type === 'radiobutton') {
+            draftMap[String(f.xref)] = f.checked;
+            if (f.checked) {
+              draftMap[f.field_name] = f.export_value || 'Yes';
+            } else if (!(f.field_name in draftMap)) {
+              draftMap[f.field_name] = '';
+            }
+          } else {
+            draftMap[f.field_name] = f.value;
+            draftMap[String(f.xref)] = f.value;
+          }
         });
         setFormDraftValues(draftMap);
         setThumbnails(thumbsRes);
@@ -1501,6 +1591,11 @@ export default function App() {
           bold: draftTextBox.bold,
           italic: draftTextBox.italic,
           align: draftTextBox.align,
+          bg_hex: draftTextBox.bg_hex && draftTextBox.bg_hex !== 'transparent' ? draftTextBox.bg_hex : undefined,
+          border_hex:
+            draftTextBox.border_hex && draftTextBox.border_hex !== 'transparent'
+              ? draftTextBox.border_hex
+              : undefined,
         });
         setDraftTextBox(null);
         await refreshDocState(activeDoc.doc_id, currentPage, res.summary);
@@ -1843,12 +1938,14 @@ export default function App() {
         setDraftTextBox({
           bbox: finalBbox,
           text: '',
-          font: toolFontName || 'helv',
-          size: toolFontSize || 12,
-          color: toolColor || '#000000',
+          font: textBoxDefaults.font || 'helv',
+          size: textBoxDefaults.size || 11,
+          color: textBoxDefaults.color || '#000000',
           bold: false,
           italic: false,
-          align: 'left',
+          align: textBoxDefaults.align || 'left',
+          bg_hex: textBoxDefaults.bg_hex || 'transparent',
+          border_hex: textBoxDefaults.border_hex || 'transparent',
         });
         setSubTool('select');
         setSelectedSpan(null);
@@ -1903,8 +2000,14 @@ export default function App() {
           default_value: newFieldDefault,
           choices: newFieldChoices.split(',').map((s) => s.trim()),
           font_size: 11,
+          required: newFieldRequired,
+          read_only: newFieldReadOnly,
+          multiline: fType === 'multiline' || newFieldMultiline,
+          max_length: newFieldMaxLen,
+          align: newFieldAlign,
         });
         await refreshDocState(activeDoc.doc_id, currentPage, res.summary);
+        setSubTool('select');
         notify(`Created interactive AcroForm ${fType} widget.`);
       } else if (subTool === 'sig-visual') {
         const res = await pdfApi.applyVisualSignature(activeDoc.doc_id, {
@@ -2832,12 +2935,14 @@ export default function App() {
             <>
               {(
                 [
-                  ['select', 'Fill / Select Widgets'],
-                  ['form-text', '+ Text Field'],
+                  ['select', 'Fill / Select'],
+                  ['form-text', '+ Text'],
+                  ['form-multiline', '+ Multiline'],
                   ['form-checkbox', '+ Checkbox'],
-                  ['form-radio', '+ Radio Button'],
+                  ['form-radio', '+ Radio'],
                   ['form-dropdown', '+ Dropdown'],
-                  ['form-signature', '+ Signature Field'],
+                  ['form-listbox', '+ List Box'],
+                  ['form-signature', '+ Signature'],
                 ] as Array<[SubTool, string]>
               ).map(([st, lbl]) => (
                 <button
@@ -2850,14 +2955,44 @@ export default function App() {
               ))}
               <div className="toolbar-divider" />
               <button
-                className="tool-btn primary"
+                className="tool-btn"
                 onClick={async () => {
-                  const res = await pdfApi.fillFormFields(activeDoc.doc_id, formDraftValues);
-                  await refreshDocState(activeDoc.doc_id, currentPage, res.summary);
-                  notify('Saved filled AcroForm field values into PDF stream.');
+                  const res = await pdfApi.detectFormCandidates(activeDoc.doc_id, currentPage);
+                  const cands = (res.candidates || []).map((c) => ({ ...c, accepted: true }));
+                  setFormCandidates(cands);
+                  setRightOpen(true);
+                  notify(
+                    cands.length > 0
+                      ? `Detected ${cands.length} potential form field(s) on Page ${currentPage + 1}. Review & confirm in Inspector.`
+                      : `No static box/checkbox candidates detected on Page ${currentPage + 1}.`
+                  );
                 }}
               >
-                <CheckCircle2 size={14} /> Save Filled Form Values
+                <Sparkles size={14} /> Detect Fields
+              </button>
+              <label style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 12, padding: '0 6px' }}>
+                <input
+                  type="checkbox"
+                  checked={formAutoFit}
+                  onChange={(e) => setFormAutoFit(e.target.checked)}
+                />
+                Auto-Fit Text
+              </label>
+              <button
+                className="tool-btn primary"
+                onClick={async () => {
+                  const res = await pdfApi.fillFormFields(activeDoc.doc_id, formDraftValues, undefined, formAutoFit);
+                  const warns = res.warnings || [];
+                  setFormFillWarnings(warns);
+                  await refreshDocState(activeDoc.doc_id, currentPage, res.summary);
+                  if (warns.length > 0) {
+                    notify(`Saved form values with ${warns.length} fitting/length warning(s).`, 'warn');
+                  } else {
+                    notify('Saved filled AcroForm field values into PDF stream.');
+                  }
+                }}
+              >
+                <CheckCircle2 size={14} /> Save Filled Values
               </button>
             </>
           )}
@@ -3593,73 +3728,203 @@ export default function App() {
                 {/* Interactive AcroForm Widgets Overlay */}
                 {(mode === 'forms' || mode === 'view') &&
                   subTool === 'select' &&
-                  pageFormFields.map((fld) => (
-                    <div
-                      key={fld.xref}
-                      className={`form-widget-box ${selectedField?.xref === fld.xref ? 'selected' : ''}`}
-                      style={{
-                        left: `${fld.bbox[0] * zoom}px`,
-                        top: `${fld.bbox[1] * zoom}px`,
-                        width: `${Math.max(20, (fld.bbox[2] - fld.bbox[0]) * zoom)}px`,
-                        height: `${Math.max(18, (fld.bbox[3] - fld.bbox[1]) * zoom)}px`,
-                      }}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        setSelectedField(fld);
-                      }}
-                    >
-                      {fld.field_type === 'checkbox' || fld.field_type === 'radiobutton' ? (
-                        <input
-                          type="checkbox"
-                          checked={Boolean(formDraftValues[fld.field_name])}
-                          onChange={(e) =>
-                            setFormDraftValues((prev) => ({
-                              ...prev,
-                              [fld.field_name]: e.target.checked,
-                            }))
+                  [...pageFormFields]
+                    .sort((a, b) => (a.tab_order ?? 0) - (b.tab_order ?? 0))
+                    .map((fld, idx, sortedArr) => {
+                      const handleFieldTabNav = (e: React.KeyboardEvent) => {
+                        if (e.key === 'Tab') {
+                          e.preventDefault();
+                          const nextIdx = e.shiftKey
+                            ? (idx - 1 + sortedArr.length) % sortedArr.length
+                            : (idx + 1) % sortedArr.length;
+                          const nextFld = sortedArr[nextIdx];
+                          if (nextFld) {
+                            setSelectedField(nextFld);
+                            formWidgetRefs.current[nextFld.xref]?.focus();
                           }
-                          style={{ width: '100%', height: '100%', cursor: 'pointer' }}
-                        />
-                      ) : fld.field_type === 'dropdown' ? (
-                        <select
-                          value={String(formDraftValues[fld.field_name] ?? fld.value)}
-                          onChange={(e) =>
-                            setFormDraftValues((prev) => ({
-                              ...prev,
-                              [fld.field_name]: e.target.value,
-                            }))
-                          }
-                          style={{ width: '100%', height: '100%', fontSize: 11, padding: 1 }}
-                        >
-                          {fld.choices.map((c) => (
-                            <option key={c} value={c}>
-                              {c}
-                            </option>
-                          ))}
-                        </select>
-                      ) : (
-                        <input
-                          type="text"
-                          value={String(formDraftValues[fld.field_name] ?? fld.value)}
-                          onChange={(e) =>
-                            setFormDraftValues((prev) => ({
-                              ...prev,
-                              [fld.field_name]: e.target.value,
-                            }))
-                          }
+                        }
+                      };
+                      const fieldTextColor = fld.text_color || '#000000';
+                      const fieldFontSize = Math.max(
+                        9,
+                        (fld.text_fontsize && fld.text_fontsize > 0 ? fld.text_fontsize : 11) * zoom * 0.9
+                      );
+                      const fieldAlign = (fld.align as 'left' | 'center' | 'right') || 'left';
+                      const draftVal =
+                        formDraftValues[String(fld.xref)] !== undefined
+                          ? formDraftValues[String(fld.xref)]
+                          : formDraftValues[fld.field_name] ?? fld.value;
+
+                      return (
+                        <div
+                          key={fld.xref}
+                          className={`form-widget-box ${selectedField?.xref === fld.xref ? 'selected' : ''}`}
+                          title={`${fld.field_label || fld.field_name}${fld.required ? ' (Required)' : ''}${fld.read_only ? ' (Read-Only)' : ''}`}
                           style={{
-                            width: '100%',
-                            height: '100%',
-                            fontSize: `${Math.max(10, fld.text_fontsize * zoom * 0.85)}px`,
-                            padding: '1px 4px',
-                            background: 'rgba(255,255,255,0.88)',
-                            color: '#0f172a',
-                            border: 'none',
+                            left: `${fld.bbox[0] * zoom}px`,
+                            top: `${fld.bbox[1] * zoom}px`,
+                            width: `${Math.max(18, (fld.bbox[2] - fld.bbox[0]) * zoom)}px`,
+                            height: `${Math.max(16, (fld.bbox[3] - fld.bbox[1]) * zoom)}px`,
                           }}
-                        />
-                      )}
-                    </div>
-                  ))}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setSelectedField(fld);
+                          }}
+                        >
+                          {fld.field_type === 'checkbox' ? (
+                            <input
+                              ref={(el) => {
+                                formWidgetRefs.current[fld.xref] = el;
+                              }}
+                              type="checkbox"
+                              disabled={fld.read_only}
+                              checked={Boolean(draftVal)}
+                              onKeyDown={handleFieldTabNav}
+                              onChange={(e) => {
+                                const checked = e.target.checked;
+                                setFormDraftValues((prev) => ({
+                                  ...prev,
+                                  [fld.field_name]: checked,
+                                  [String(fld.xref)]: checked,
+                                }));
+                              }}
+                              style={{ width: '100%', height: '100%', cursor: fld.read_only ? 'not-allowed' : 'pointer' }}
+                            />
+                          ) : fld.field_type === 'radiobutton' ? (
+                            <input
+                              ref={(el) => {
+                                formWidgetRefs.current[fld.xref] = el;
+                              }}
+                              type="radio"
+                              name={`vellum_radio_${fld.field_name}`}
+                              disabled={fld.read_only}
+                              checked={Boolean(formDraftValues[String(fld.xref)])}
+                              onKeyDown={handleFieldTabNav}
+                              onChange={() => {
+                                const expVal = fld.export_value || 'Yes';
+                                setFormDraftValues((prev) => {
+                                  const next = { ...prev, [fld.field_name]: expVal };
+                                  formFields
+                                    .filter((other) => other.field_name === fld.field_name && other.field_type === 'radiobutton')
+                                    .forEach((other) => {
+                                      next[String(other.xref)] = other.xref === fld.xref;
+                                    });
+                                  return next;
+                                });
+                              }}
+                              style={{ width: '100%', height: '100%', cursor: fld.read_only ? 'not-allowed' : 'pointer' }}
+                            />
+                          ) : fld.field_type === 'dropdown' ? (
+                            <select
+                              ref={(el) => {
+                                formWidgetRefs.current[fld.xref] = el;
+                              }}
+                              disabled={fld.read_only}
+                              value={String(draftVal ?? '')}
+                              onKeyDown={handleFieldTabNav}
+                              onChange={(e) => {
+                                const val = e.target.value;
+                                setFormDraftValues((prev) => ({
+                                  ...prev,
+                                  [fld.field_name]: val,
+                                  [String(fld.xref)]: val,
+                                }));
+                              }}
+                              style={{ width: '100%', height: '100%', fontSize: Math.max(10, fieldFontSize), padding: 1 }}
+                            >
+                              {fld.choices.map((c) => (
+                                <option key={c} value={c}>
+                                  {c}
+                                </option>
+                              ))}
+                            </select>
+                          ) : fld.field_type === 'listbox' ? (
+                            <select
+                              ref={(el) => {
+                                formWidgetRefs.current[fld.xref] = el;
+                              }}
+                              size={Math.min(5, Math.max(2, fld.choices.length || 3))}
+                              disabled={fld.read_only}
+                              value={String(draftVal ?? '')}
+                              onKeyDown={handleFieldTabNav}
+                              onChange={(e) => {
+                                const val = e.target.value;
+                                setFormDraftValues((prev) => ({
+                                  ...prev,
+                                  [fld.field_name]: val,
+                                  [String(fld.xref)]: val,
+                                }));
+                              }}
+                              style={{ width: '100%', height: '100%', fontSize: Math.max(10, fieldFontSize), padding: 1 }}
+                            >
+                              {fld.choices.map((c) => (
+                                <option key={c} value={c}>
+                                  {c}
+                                </option>
+                              ))}
+                            </select>
+                          ) : fld.multiline ? (
+                            <textarea
+                              ref={(el) => {
+                                formWidgetRefs.current[fld.xref] = el;
+                              }}
+                              readOnly={fld.read_only}
+                              maxLength={fld.text_maxlen && fld.text_maxlen > 0 ? fld.text_maxlen : undefined}
+                              value={String(draftVal ?? '')}
+                              onKeyDown={handleFieldTabNav}
+                              onChange={(e) => {
+                                const val = e.target.value;
+                                setFormDraftValues((prev) => ({
+                                  ...prev,
+                                  [fld.field_name]: val,
+                                  [String(fld.xref)]: val,
+                                }));
+                              }}
+                              style={{
+                                width: '100%',
+                                height: '100%',
+                                resize: 'none',
+                                fontSize: `${fieldFontSize}px`,
+                                textAlign: fieldAlign,
+                                padding: '2px 4px',
+                                background: 'rgba(255,255,255,0.90)',
+                                color: fieldTextColor,
+                                border: 'none',
+                              }}
+                            />
+                          ) : (
+                            <input
+                              ref={(el) => {
+                                formWidgetRefs.current[fld.xref] = el;
+                              }}
+                              type={fld.password_field ? 'password' : 'text'}
+                              readOnly={fld.read_only}
+                              maxLength={fld.text_maxlen && fld.text_maxlen > 0 ? fld.text_maxlen : undefined}
+                              value={String(draftVal ?? '')}
+                              onKeyDown={handleFieldTabNav}
+                              onChange={(e) => {
+                                const val = e.target.value;
+                                setFormDraftValues((prev) => ({
+                                  ...prev,
+                                  [fld.field_name]: val,
+                                  [String(fld.xref)]: val,
+                                }));
+                              }}
+                              style={{
+                                width: '100%',
+                                height: '100%',
+                                fontSize: `${fieldFontSize}px`,
+                                textAlign: fieldAlign,
+                                padding: '1px 4px',
+                                background: 'rgba(255,255,255,0.90)',
+                                color: fieldTextColor,
+                                border: 'none',
+                              }}
+                            />
+                          )}
+                        </div>
+                      );
+                    })}
 
                 {/* Active Rubber-Band Selection Box */}
                 {dragStart && dragCurrent && (
@@ -4339,6 +4604,79 @@ export default function App() {
                         }}
                       />
                     </div>
+                  </div>
+                  <div className="form-row">
+                    <div className="form-group">
+                      <label>Background</label>
+                      <select
+                        value={draftTextBox.bg_hex || 'transparent'}
+                        onChange={(e) =>
+                          setDraftTextBox((prev) => (prev ? { ...prev, bg_hex: e.target.value } : null))
+                        }
+                      >
+                        <option value="transparent">Transparent (None)</option>
+                        <option value="#ffffff">White (#FFFFFF)</option>
+                        <option value="#fef9c3">Soft Yellow (#FEF9C3)</option>
+                        <option value="#f1f5f9">Light Slate (#F1F5F9)</option>
+                      </select>
+                    </div>
+                    <div className="form-group">
+                      <label>Border</label>
+                      <select
+                        value={draftTextBox.border_hex || 'transparent'}
+                        onChange={(e) =>
+                          setDraftTextBox((prev) => (prev ? { ...prev, border_hex: e.target.value } : null))
+                        }
+                      >
+                        <option value="transparent">No Border</option>
+                        <option value="#000000">Black (#000000)</option>
+                        <option value="#475569">Slate (#475569)</option>
+                      </select>
+                    </div>
+                  </div>
+                  <div style={{ display: 'flex', gap: 6, marginTop: 6 }}>
+                    <button
+                      type="button"
+                      className="tool-btn"
+                      style={{ flex: 1, fontSize: 11 }}
+                      onClick={() =>
+                        saveTextBoxDefaults({
+                          color: draftTextBox.color,
+                          font: draftTextBox.font,
+                          size: draftTextBox.size,
+                          align: draftTextBox.align,
+                          bg_hex: draftTextBox.bg_hex || 'transparent',
+                          border_hex: draftTextBox.border_hex || 'transparent',
+                        })
+                      }
+                      title="Save current styling as persistent default for new text boxes"
+                    >
+                      Save as Default
+                    </button>
+                    <button
+                      type="button"
+                      className="tool-btn"
+                      style={{ fontSize: 11 }}
+                      onClick={() => {
+                        resetTextBoxDefaults();
+                        setDraftTextBox((prev) =>
+                          prev
+                            ? {
+                                ...prev,
+                                color: FACTORY_TEXTBOX_DEFAULTS.color,
+                                font: FACTORY_TEXTBOX_DEFAULTS.font,
+                                size: FACTORY_TEXTBOX_DEFAULTS.size,
+                                align: FACTORY_TEXTBOX_DEFAULTS.align,
+                                bg_hex: FACTORY_TEXTBOX_DEFAULTS.bg_hex,
+                                border_hex: FACTORY_TEXTBOX_DEFAULTS.border_hex,
+                              }
+                            : null
+                        );
+                      }}
+                      title="Reset to #000000, Helvetica 11pt, Left, Transparent"
+                    >
+                      Reset Defaults
+                    </button>
                   </div>
                   <div style={{ display: 'flex', gap: 6, marginTop: 10 }}>
                     <button
@@ -5155,6 +5493,479 @@ export default function App() {
                       Split Into Document Tabs
                     </button>
                   </div>
+                </>
+              )}
+
+              {/* INTERACTIVE FORMS & PREPARE FORM INSPECTOR */}
+              {mode === 'forms' && activeDoc && (
+                <>
+                  {formInspection?.is_xfa && (
+                    <div className="inspector-section" style={{ borderLeft: '3px solid #f59e0b', paddingLeft: 8 }}>
+                      <h4 style={{ color: '#f59e0b' }}>
+                        <AlertTriangle size={14} /> XFA Form Detected
+                      </h4>
+                      <p className="hint-text">{formInspection.xfa_notice}</p>
+                    </div>
+                  )}
+
+                  {formFillWarnings.length > 0 && (
+                    <div className="inspector-section" style={{ borderLeft: '3px solid #f59e0b', paddingLeft: 8 }}>
+                      <h4>
+                        <AlertTriangle size={14} /> Text Fitting Warnings ({formFillWarnings.length})
+                      </h4>
+                      {formFillWarnings.map((w, i) => (
+                        <p key={`${w.xref}_${i}`} className="hint-text" style={{ marginBottom: 4 }}>
+                          <strong>{w.field_name}:</strong> {w.message}
+                        </p>
+                      ))}
+                    </div>
+                  )}
+
+                  {selectedField ? (
+                    <div className="inspector-section">
+                      <h4>
+                        <Edit3 size={14} /> Field Properties ({selectedField.field_type})
+                      </h4>
+                      <div className="form-group">
+                        <label>Field Name</label>
+                        <input
+                          type="text"
+                          value={selectedField.field_name}
+                          onChange={(e) =>
+                            setSelectedField((prev) => (prev ? { ...prev, field_name: e.target.value } : null))
+                          }
+                        />
+                      </div>
+                      <div className="form-group">
+                        <label>Tooltip / Label</label>
+                        <input
+                          type="text"
+                          value={selectedField.field_label}
+                          onChange={(e) =>
+                            setSelectedField((prev) => (prev ? { ...prev, field_label: e.target.value } : null))
+                          }
+                        />
+                      </div>
+                      {(selectedField.field_type === 'dropdown' || selectedField.field_type === 'listbox') && (
+                        <div className="form-group">
+                          <label>Options (comma-separated)</label>
+                          <input
+                            type="text"
+                            value={selectedField.choices.join(', ')}
+                            onChange={(e) =>
+                              setSelectedField((prev) =>
+                                prev
+                                  ? {
+                                      ...prev,
+                                      choices: e.target.value
+                                        .split(',')
+                                        .map((s) => s.trim())
+                                        .filter(Boolean),
+                                    }
+                                  : null
+                              )
+                            }
+                          />
+                        </div>
+                      )}
+                      <div className="form-row">
+                        <div className="form-group">
+                          <label>Font Size (0=Auto)</label>
+                          <input
+                            type="number"
+                            min="0"
+                            max="72"
+                            step="0.5"
+                            value={selectedField.text_fontsize}
+                            onChange={(e) =>
+                              setSelectedField((prev) =>
+                                prev ? { ...prev, text_fontsize: Number(e.target.value) } : null
+                              )
+                            }
+                          />
+                        </div>
+                        <div className="form-group">
+                          <label>Alignment</label>
+                          <select
+                            value={selectedField.align || 'left'}
+                            onChange={(e) =>
+                              setSelectedField((prev) => (prev ? { ...prev, align: e.target.value } : null))
+                            }
+                          >
+                            <option value="left">Left</option>
+                            <option value="center">Center</option>
+                            <option value="right">Right</option>
+                          </select>
+                        </div>
+                      </div>
+                      <div className="form-row">
+                        <label style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 12 }}>
+                          <input
+                            type="checkbox"
+                            checked={Boolean(selectedField.required)}
+                            onChange={(e) =>
+                              setSelectedField((prev) => (prev ? { ...prev, required: e.target.checked } : null))
+                            }
+                          />
+                          Required
+                        </label>
+                        <label style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 12 }}>
+                          <input
+                            type="checkbox"
+                            checked={Boolean(selectedField.read_only)}
+                            onChange={(e) =>
+                              setSelectedField((prev) => (prev ? { ...prev, read_only: e.target.checked } : null))
+                            }
+                          />
+                          Read-Only
+                        </label>
+                        {selectedField.field_type === 'text' && (
+                          <label style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 12 }}>
+                            <input
+                              type="checkbox"
+                              checked={Boolean(selectedField.multiline)}
+                              onChange={(e) =>
+                                setSelectedField((prev) => (prev ? { ...prev, multiline: e.target.checked } : null))
+                              }
+                            />
+                            Multiline
+                          </label>
+                        )}
+                      </div>
+                      <div className="form-row">
+                        <div className="form-group">
+                          <label>X (pt)</label>
+                          <input
+                            type="number"
+                            value={Math.round(selectedField.bbox[0])}
+                            onChange={(e) => {
+                              const nx = Number(e.target.value);
+                              const w = selectedField.bbox[2] - selectedField.bbox[0];
+                              setSelectedField((prev) =>
+                                prev ? { ...prev, bbox: [nx, prev.bbox[1], +(nx + w).toFixed(1), prev.bbox[3]] } : null
+                              );
+                            }}
+                          />
+                        </div>
+                        <div className="form-group">
+                          <label>Y (pt)</label>
+                          <input
+                            type="number"
+                            value={Math.round(selectedField.bbox[1])}
+                            onChange={(e) => {
+                              const ny = Number(e.target.value);
+                              const h = selectedField.bbox[3] - selectedField.bbox[1];
+                              setSelectedField((prev) =>
+                                prev ? { ...prev, bbox: [prev.bbox[0], ny, prev.bbox[2], +(ny + h).toFixed(1)] } : null
+                              );
+                            }}
+                          />
+                        </div>
+                      </div>
+                      <div className="form-row">
+                        <div className="form-group">
+                          <label>Width (pt)</label>
+                          <input
+                            type="number"
+                            min="12"
+                            value={Math.round(selectedField.bbox[2] - selectedField.bbox[0])}
+                            onChange={(e) => {
+                              const nw = Math.max(12, Number(e.target.value));
+                              setSelectedField((prev) =>
+                                prev ? { ...prev, bbox: [prev.bbox[0], prev.bbox[1], +(prev.bbox[0] + nw).toFixed(1), prev.bbox[3]] } : null
+                              );
+                            }}
+                          />
+                        </div>
+                        <div className="form-group">
+                          <label>Height (pt)</label>
+                          <input
+                            type="number"
+                            min="12"
+                            value={Math.round(selectedField.bbox[3] - selectedField.bbox[1])}
+                            onChange={(e) => {
+                              const nh = Math.max(12, Number(e.target.value));
+                              setSelectedField((prev) =>
+                                prev ? { ...prev, bbox: [prev.bbox[0], prev.bbox[1], prev.bbox[2], +(prev.bbox[1] + nh).toFixed(1)] } : null
+                              );
+                            }}
+                          />
+                        </div>
+                      </div>
+                      <div style={{ display: 'flex', gap: 6, marginTop: 8 }}>
+                        <button
+                          className="tool-btn primary"
+                          style={{ flex: 1 }}
+                          onClick={async () => {
+                            const res = await pdfApi.updateFormField(activeDoc.doc_id, selectedField.xref, {
+                              page_index: selectedField.page_index,
+                              field_name: selectedField.field_name,
+                              tooltip: selectedField.field_label,
+                              bbox: selectedField.bbox,
+                              choices: selectedField.choices,
+                              font_size: selectedField.text_fontsize,
+                              align: selectedField.align,
+                              required: selectedField.required,
+                              read_only: selectedField.read_only,
+                              multiline: selectedField.multiline,
+                            });
+                            await refreshDocState(activeDoc.doc_id, currentPage, res.summary);
+                            notify(`Updated form field '${selectedField.field_name}'.`);
+                          }}
+                        >
+                          Apply Field Changes
+                        </button>
+                        <button
+                          className="tool-btn"
+                          title="Duplicate field"
+                          onClick={async () => {
+                            const res = await pdfApi.duplicateFormField(
+                              activeDoc.doc_id,
+                              selectedField.xref,
+                              selectedField.page_index
+                            );
+                            await refreshDocState(activeDoc.doc_id, currentPage, res.summary);
+                            notify(`Duplicated '${selectedField.field_name}'.`);
+                          }}
+                        >
+                          <Copy size={13} />
+                        </button>
+                        <button
+                          className="tool-btn danger"
+                          title="Delete field"
+                          onClick={async () => {
+                            const res = await pdfApi.deleteFormField(
+                              activeDoc.doc_id,
+                              selectedField.xref,
+                              selectedField.page_index
+                            );
+                            setSelectedField(null);
+                            await refreshDocState(activeDoc.doc_id, currentPage, res.summary);
+                            notify(`Deleted form field '${selectedField.field_name}'.`);
+                          }}
+                        >
+                          <Trash2 size={13} />
+                        </button>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="inspector-section">
+                      <h4>
+                        <FileText size={14} /> Prepare Form & Creation Defaults
+                      </h4>
+                      <p className="hint-text">
+                        Click a field on the page to fill or edit it, or choose a tool above and drag to add a new AcroForm widget.
+                      </p>
+                      <div className="form-group">
+                        <label>New Field Name</label>
+                        <input
+                          type="text"
+                          value={newFieldName}
+                          onChange={(e) => setNewFieldName(e.target.value)}
+                        />
+                      </div>
+                      <div className="form-group">
+                        <label>Choices (Dropdown / ListBox)</label>
+                        <input
+                          type="text"
+                          value={newFieldChoices}
+                          onChange={(e) => setNewFieldChoices(e.target.value)}
+                        />
+                      </div>
+                      <div className="form-row">
+                        <div className="form-group">
+                          <label>Alignment</label>
+                          <select
+                            value={newFieldAlign}
+                            onChange={(e) => setNewFieldAlign(e.target.value as any)}
+                          >
+                            <option value="left">Left</option>
+                            <option value="center">Center</option>
+                            <option value="right">Right</option>
+                          </select>
+                        </div>
+                        <div className="form-group">
+                          <label>Max Length (0=None)</label>
+                          <input
+                            type="number"
+                            min="0"
+                            value={newFieldMaxLen}
+                            onChange={(e) => setNewFieldMaxLen(Math.max(0, Number(e.target.value)))}
+                          />
+                        </div>
+                      </div>
+                      <div className="form-row">
+                        <label style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 12 }}>
+                          <input
+                            type="checkbox"
+                            checked={newFieldRequired}
+                            onChange={(e) => setNewFieldRequired(e.target.checked)}
+                          />
+                          Required
+                        </label>
+                        <label style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 12 }}>
+                          <input
+                            type="checkbox"
+                            checked={newFieldReadOnly}
+                            onChange={(e) => setNewFieldReadOnly(e.target.checked)}
+                          />
+                          Read-Only
+                        </label>
+                        <label style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 12 }}>
+                          <input
+                            type="checkbox"
+                            checked={newFieldMultiline}
+                            onChange={(e) => setNewFieldMultiline(e.target.checked)}
+                          />
+                          Multiline
+                        </label>
+                      </div>
+                    </div>
+                  )}
+
+                  {pageFormFields.length > 0 && (
+                    <div className="inspector-section">
+                      <h4>Tab Order (Page {currentPage + 1})</h4>
+                      {[...pageFormFields]
+                        .sort((a, b) => (a.tab_order ?? 0) - (b.tab_order ?? 0))
+                        .map((fld, idx, arr) => (
+                          <div
+                            key={fld.xref}
+                            style={{
+                              display: 'flex',
+                              alignItems: 'center',
+                              justifyContent: 'space-between',
+                              padding: '3px 4px',
+                              fontSize: 11.5,
+                              borderBottom: '1px solid var(--border-subtle)',
+                            }}
+                          >
+                            <span
+                              style={{ cursor: 'pointer', flex: 1 }}
+                              onClick={() => {
+                                setSelectedField(fld);
+                                formWidgetRefs.current[fld.xref]?.focus();
+                              }}
+                            >
+                              {idx + 1}. {fld.field_name} ({fld.field_type})
+                            </span>
+                            <div style={{ display: 'flex', gap: 2 }}>
+                              <button
+                                className="tool-btn"
+                                disabled={idx === 0}
+                                onClick={async () => {
+                                  const order = arr.map((x) => x.xref);
+                                  [order[idx - 1], order[idx]] = [order[idx], order[idx - 1]];
+                                  const res = await pdfApi.reorderFormTabOrder(activeDoc.doc_id, currentPage, order);
+                                  await refreshDocState(activeDoc.doc_id, currentPage, res.summary);
+                                }}
+                              >
+                                ↑
+                              </button>
+                              <button
+                                className="tool-btn"
+                                disabled={idx === arr.length - 1}
+                                onClick={async () => {
+                                  const order = arr.map((x) => x.xref);
+                                  [order[idx], order[idx + 1]] = [order[idx + 1], order[idx]];
+                                  const res = await pdfApi.reorderFormTabOrder(activeDoc.doc_id, currentPage, order);
+                                  await refreshDocState(activeDoc.doc_id, currentPage, res.summary);
+                                }}
+                              >
+                                ↓
+                              </button>
+                            </div>
+                          </div>
+                        ))}
+                    </div>
+                  )}
+
+                  {formCandidates.length > 0 && (
+                    <div className="inspector-section">
+                      <h4>
+                        <Sparkles size={14} /> Suggested Fields ({formCandidates.length})
+                      </h4>
+                      <p className="hint-text">
+                        Review and confirm before inserting interactive fields into the PDF.
+                      </p>
+                      {formCandidates.map((cand) => (
+                        <div
+                          key={cand.id}
+                          style={{
+                            padding: '6px 0',
+                            borderBottom: '1px solid var(--border-subtle)',
+                            display: 'flex',
+                            flexDirection: 'column',
+                            gap: 4,
+                          }}
+                        >
+                          <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12 }}>
+                            <input
+                              type="checkbox"
+                              checked={cand.accepted !== false}
+                              onChange={(e) =>
+                                setFormCandidates((prev) =>
+                                  prev.map((c) => (c.id === cand.id ? { ...c, accepted: e.target.checked } : c))
+                                )
+                              }
+                            />
+                            <input
+                              type="text"
+                              value={cand.field_name}
+                              onChange={(e) =>
+                                setFormCandidates((prev) =>
+                                  prev.map((c) => (c.id === cand.id ? { ...c, field_name: e.target.value } : c))
+                                )
+                              }
+                              style={{ flex: 1, fontSize: 11.5 }}
+                            />
+                            <select
+                              value={cand.field_type}
+                              onChange={(e) =>
+                                setFormCandidates((prev) =>
+                                  prev.map((c) => (c.id === cand.id ? { ...c, field_type: e.target.value } : c))
+                                )
+                              }
+                              style={{ fontSize: 11 }}
+                            >
+                              <option value="text">text</option>
+                              <option value="multiline">multiline</option>
+                              <option value="checkbox">checkbox</option>
+                            </select>
+                          </label>
+                        </div>
+                      ))}
+                      <div style={{ display: 'flex', gap: 6, marginTop: 8 }}>
+                        <button
+                          className="tool-btn primary"
+                          style={{ flex: 1 }}
+                          onClick={async () => {
+                            const selected = formCandidates.filter((c) => c.accepted !== false);
+                            let lastSummary = activeDoc;
+                            for (const c of selected) {
+                              const res = await pdfApi.createFormField(activeDoc.doc_id, {
+                                page_index: c.page_index,
+                                field_type: c.field_type,
+                                field_name: c.field_name,
+                                bbox: c.bbox,
+                                multiline: c.field_type === 'multiline',
+                                tooltip: c.label,
+                              });
+                              lastSummary = res.summary;
+                            }
+                            setFormCandidates([]);
+                            await refreshDocState(activeDoc.doc_id, currentPage, lastSummary);
+                            notify(`Inserted ${selected.length} confirmed form field(s).`);
+                          }}
+                        >
+                          Confirm & Insert ({formCandidates.filter((c) => c.accepted !== false).length})
+                        </button>
+                        <button className="tool-btn" onClick={() => setFormCandidates([])}>
+                          Dismiss
+                        </button>
+                      </div>
+                    </div>
+                  )}
                 </>
               )}
 

@@ -31,9 +31,13 @@ from .engine.forms_signatures import (
     apply_visual_signature,
     create_form_field,
     delete_form_field,
-    fill_form_fields,
+    detect_form_field_candidates,
+    duplicate_form_field,
+    fill_form_fields_with_report,
     generate_pkcs12_certificate,
+    inspect_form_fields,
     list_form_fields,
+    reorder_form_tab_order,
     sign_pdf_cryptographic,
     update_form_field,
     verify_pdf_signatures,
@@ -330,12 +334,18 @@ class CreateFormFieldRequest(BaseModel):
     fill_color_hex: str = "#f8fafc"
     border_color_hex: str = "#475569"
     read_only: bool = False
+    required: bool = False
+    multiline: bool = False
+    max_length: int = 0
+    align: str = "left"
+    font_name: str = "helv"
     tooltip: str = ""
 
 
 class FillFormFieldsRequest(BaseModel):
     values: Dict[str, Any]
     page_index: Optional[int] = None
+    auto_fit: bool = True
 
 
 class UpdateFormFieldRequest(BaseModel):
@@ -345,9 +355,21 @@ class UpdateFormFieldRequest(BaseModel):
     bbox: Optional[List[float]] = None
     choices: Optional[List[str]] = None
     read_only: Optional[bool] = None
+    required: Optional[bool] = None
+    multiline: Optional[bool] = None
+    max_length: Optional[int] = None
+    align: Optional[str] = None
+    font_name: Optional[str] = None
     text_color_hex: Optional[str] = None
     fill_color_hex: Optional[str] = None
+    border_color_hex: Optional[str] = None
     font_size: Optional[float] = None
+    tooltip: Optional[str] = None
+
+
+class FormTabOrderRequest(BaseModel):
+    page_index: int = 0
+    ordered_xrefs: List[int]
 
 
 class VisualSignatureRequest(BaseModel):
@@ -1256,6 +1278,19 @@ def api_list_forms(doc_id: str, page_index: Optional[int] = Query(None)) -> List
     return list_form_fields(session.pdf_bytes, page_index=page_index)
 
 
+@app.get("/api/docs/{doc_id}/forms/inspect")
+def api_inspect_forms(doc_id: str, page_index: Optional[int] = Query(None)) -> Dict[str, Any]:
+    session = session_manager.get_session(doc_id)
+    return inspect_form_fields(session.pdf_bytes, page_index=page_index)
+
+
+@app.post("/api/docs/{doc_id}/forms/detect-candidates")
+def api_detect_form_candidates(doc_id: str, page_index: int = Query(0)) -> Dict[str, Any]:
+    session = session_manager.get_session(doc_id)
+    candidates = detect_form_field_candidates(session.pdf_bytes, page_index=page_index)
+    return {"page_index": page_index, "candidates": candidates}
+
+
 @app.post("/api/docs/{doc_id}/forms/create")
 def api_create_form_field(doc_id: str, req: CreateFormFieldRequest) -> Dict[str, Any]:
     session = session_manager.get_session(doc_id)
@@ -1273,6 +1308,11 @@ def api_create_form_field(doc_id: str, req: CreateFormFieldRequest) -> Dict[str,
         fill_color_hex=req.fill_color_hex,
         border_color_hex=req.border_color_hex,
         read_only=req.read_only,
+        required=req.required,
+        multiline=req.multiline,
+        max_length=req.max_length,
+        align=req.align,
+        font_name=req.font_name,
         tooltip=req.tooltip,
     )
     session_manager.update_session(doc_id, new_bytes, action=f"Create Form Field ({req.field_name})")
@@ -1285,8 +1325,36 @@ def api_create_form_field(doc_id: str, req: CreateFormFieldRequest) -> Dict[str,
 @app.post("/api/docs/{doc_id}/forms/fill")
 def api_fill_forms(doc_id: str, req: FillFormFieldsRequest) -> Dict[str, Any]:
     session = session_manager.get_session(doc_id)
-    new_bytes = fill_form_fields(session.pdf_bytes, values=req.values, page_index=req.page_index)
-    session_manager.update_session(doc_id, new_bytes, action="Fill Form Fields")
+    res = fill_form_fields_with_report(
+        session.pdf_bytes,
+        values=req.values,
+        page_index=req.page_index,
+        auto_fit=req.auto_fit,
+    )
+    session_manager.update_session(doc_id, res["pdf_bytes"], action="Fill Form Fields")
+    return {
+        "summary": session_manager.get_document_summary(doc_id),
+        "fields": list_form_fields(session.pdf_bytes),
+        "warnings": res["warnings"],
+    }
+
+
+@app.post("/api/docs/{doc_id}/forms/tab-order")
+def api_reorder_form_tab_order(doc_id: str, req: FormTabOrderRequest) -> Dict[str, Any]:
+    session = session_manager.get_session(doc_id)
+    new_bytes = reorder_form_tab_order(session.pdf_bytes, page_index=req.page_index, ordered_xrefs=req.ordered_xrefs)
+    session_manager.update_session(doc_id, new_bytes, action="Reorder Form Tab Order")
+    return {
+        "summary": session_manager.get_document_summary(doc_id),
+        "fields": list_form_fields(session.pdf_bytes),
+    }
+
+
+@app.post("/api/docs/{doc_id}/forms/{xref}/duplicate")
+def api_duplicate_form_field(doc_id: str, xref: int, page_index: int = Query(0)) -> Dict[str, Any]:
+    session = session_manager.get_session(doc_id)
+    new_bytes = duplicate_form_field(session.pdf_bytes, page_index=page_index, xref=xref)
+    session_manager.update_session(doc_id, new_bytes, action=f"Duplicate Form Field ({xref})")
     return {
         "summary": session_manager.get_document_summary(doc_id),
         "fields": list_form_fields(session.pdf_bytes),
@@ -1305,9 +1373,16 @@ def api_update_form_field(doc_id: str, xref: int, req: UpdateFormFieldRequest) -
         bbox=req.bbox,
         choices=req.choices,
         read_only=req.read_only,
+        required=req.required,
+        multiline=req.multiline,
+        max_length=req.max_length,
+        align=req.align,
+        font_name=req.font_name,
         text_color_hex=req.text_color_hex,
         fill_color_hex=req.fill_color_hex,
+        border_color_hex=req.border_color_hex,
         font_size=req.font_size,
+        tooltip=req.tooltip,
     )
     session_manager.update_session(doc_id, new_bytes, action=f"Update Form Field ({xref})")
     return {

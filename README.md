@@ -39,8 +39,11 @@ Unlike superficial PDF annotators that merely draw opaque rectangles over text, 
   - Highlight, underline, strikeout, sticky notes, freehand ink drawing, and standard PDF stamps (`APPROVED`, `CONFIDENTIAL`, `DRAFT`, etc.).
   - Comment sidebar navigation with author and timestamp metadata.
 - **Interactive Forms & Digital Signatures**:
-  - Fill existing AcroForm fields (text boxes, checkboxes, radio buttons, dropdowns).
-  - Form designer: create new interactive form fields and flatten forms into permanent content.
+  - **Direct Form Filling**: Click directly into existing AcroForm fields (single-line text, multiline text, checkboxes, grouped radio buttons, dropdowns, and list boxes), navigate with `Tab` / `Shift+Tab`, auto-fit long entries, and save values into PDF appearance streams.
+  - **Prepare Form Authoring**: Add new text, multiline, checkbox, radio, dropdown, list box, and signature fields; edit field properties (`required`, `read_only`, `multiline`, `max_length`, alignment, coordinates); duplicate/delete fields; reorder page tab order; and review candidate fields detected from static drawings.
+  - **XFA Notice**: Dynamic XFA forms are detected and reported with a non-destructive notice banner (XFA script execution and dynamic XFA layout rendering are not supported).
+- **Default Text Box Appearance**:
+  - New text boxes default to `#000000` black, Helvetica, `11 pt`, left-aligned, transparent background, and no border, with **Save as Default** and **Reset Defaults** preferences in the Inspector.
   - Visual signatures (drawn or typed script).
   - Cryptographic X.509 digital signing with 2048-bit RSA keys and PKCS#7/CMS detached signatures.
   - Digital signature verification (tamper detection and digest check).
