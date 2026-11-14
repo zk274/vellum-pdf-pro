@@ -7,6 +7,12 @@ The project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html
 
 ## [Unreleased]
 
+### Fixed
+- **Form Data Loss & Safe Save As Workflow**:
+  - Synchronized pending form field edits (`formDraftValuesRef` / `formDirtyRef`) so **Save PDF**, **Apply Field Changes**, widget move/resize/duplicate/delete, and mode switches automatically commit pending form values before saving or mutating the PDF — eliminating data loss when **Save Filled Values** was not clicked manually.
+  - Fixed `update_form_field()` in `backend/engine/forms_signatures.py` to write `/T`, `/TU`, and `/Ff` to `/Parent` field dictionaries when present while preserving field values and appearance streams.
+  - Implemented first-save native **Save As** prompting (`<filename>_filled.pdf` in the original directory, `showOverwriteConfirmation`), **Cancel** preservation, subsequent **Save** (`Ctrl+S`) targeting the chosen output file, header **Save As** (`Ctrl+Shift+S`) button, and immediate `.dirty-dot` feedback on form edits.
+
 ### Added
 - **Interactive PDF Forms (Fill & Authoring / Prepare Form)**:
   - Full AcroForm inspection (`GET /api/docs/{doc_id}/forms/inspect`) supporting single-line text, multiline text, checkboxes, grouped radio buttons, dropdowns, list boxes, and signature placeholders while keeping static PDF vector graphics separate.

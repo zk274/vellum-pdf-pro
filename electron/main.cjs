@@ -475,10 +475,20 @@ ipcMain.handle('vellum:open-file-dialog', async () => {
 
 ipcMain.handle('vellum:save-file-dialog', async (_event, defaultFilename) => {
   if (!mainWindow) return null;
+  const testDialogFile = process.env.VELLUM_TEST_SAVE_DIALOG_FILE;
+  if (testDialogFile && fs.existsSync(testDialogFile)) {
+    const state = JSON.parse(fs.readFileSync(testDialogFile, 'utf8'));
+    state.calls = state.calls || [];
+    state.calls.push(defaultFilename || 'Document_filled.pdf');
+    const nextVal = Array.isArray(state.queue) && state.queue.length ? state.queue.shift() : null;
+    fs.writeFileSync(testDialogFile, JSON.stringify(state));
+    return nextVal;
+  }
   const result = await dialog.showSaveDialog(mainWindow, {
     title: 'Save PDF Document As',
-    defaultPath: defaultFilename || 'Document.pdf',
+    defaultPath: defaultFilename || 'Document_filled.pdf',
     filters: [{ name: 'PDF Documents', extensions: ['pdf'] }],
+    properties: ['showOverwriteConfirmation'],
   });
   if (result.canceled || !result.filePath) return null;
   return result.filePath;

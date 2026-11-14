@@ -230,3 +230,91 @@ def test_geico_real_world_detection_creation_fill_and_cross_viewer():
 
     # 10. Original fixture MUST be byte-for-byte unchanged
     assert _sha256(FIXTURE_PATH) == EXPECTED_FIXTURE_SHA256
+
+
+def test_apply_field_changes_preserves_values_and_undo_redo(tmp_path: Path):
+    """Updating field properties, saving to _filled.pdf, and Undo/Redo must preserve entered values."""
+    r_new = client.post("/api/docs/new", json={"filename": "sample_form.pdf", "width": 595, "height": 842, "page_count": 1})
+    assert r_new.status_code == 200
+    doc_id = r_new.json()["doc_id"]
+
+    # Create text, multiline, checkbox, radio, dropdown, listbox
+    specs = [
+        {"field_type": "text", "field_name": "company", "bbox": [50, 60, 260, 84]},
+        {"field_type": "multiline", "field_name": "notes", "bbox": [50, 100, 300, 155], "multiline": True},
+        {"field_type": "checkbox", "field_name": "agree", "bbox": [50, 175, 68, 193]},
+        {"field_type": "radiobutton", "field_name": "tier", "bbox": [50, 210, 68, 228]},
+        {"field_type": "dropdown", "field_name": "region", "bbox": [50, 250, 200, 274], "choices": ["East", "West"]},
+        {"field_type": "listbox", "field_name": "dept", "bbox": [50, 290, 200, 340], "choices": ["Ops", "Dispatch"]},
+    ]
+    for sp in specs:
+        res = client.post(f"/api/docs/{doc_id}/forms/create", json={"page_index": 0, **sp})
+        assert res.status_code == 200
+
+    # Fill all fields
+    fill_res = client.post(
+        f"/api/docs/{doc_id}/forms/fill",
+        json={
+            "page_index": 0,
+            "values": {
+                "company": "Example Coastal LLC",
+                "notes": "Line 1 notes\nLine 2 notes",
+                "agree": True,
+                "tier": True,
+                "region": "West",
+                "dept": "Dispatch",
+            },
+            "auto_fit": True,
+        },
+    )
+    assert fill_res.status_code == 200
+
+    # Update properties of 'company' (Apply Field Changes)
+    insp = client.get(f"/api/docs/{doc_id}/forms/inspect").json()
+    company_fld = next(f for f in insp["fields"] if f["field_name"] == "company")
+    upd = client.put(
+        f"/api/docs/{doc_id}/forms/{company_fld['xref']}",
+        json={
+            "page_index": 0,
+            "field_name": "company_legal",
+            "tooltip": "Legal Business Name",
+            "font_size": 10.0,
+            "align": "center",
+            "required": True,
+        },
+    )
+    assert upd.status_code == 200
+
+    # Verify ALL field values remained intact after Apply Field Changes
+    insp_after = client.get(f"/api/docs/{doc_id}/forms/inspect").json()
+    by_name = {f["field_name"]: f for f in insp_after["fields"]}
+    assert by_name["company_legal"]["value"] == "Example Coastal LLC"
+    assert by_name["company_legal"]["align"] == "center"
+    assert by_name["company_legal"]["required"] is True
+    assert "Line 2 notes" in by_name["notes"]["value"]
+    assert by_name["agree"]["checked"] is True
+    assert by_name["region"]["value"] == "West"
+    assert by_name["dept"]["value"] == "Dispatch"
+
+    # Save to _filled.pdf and reopen
+    out_pdf = tmp_path / "sample_form_filled.pdf"
+    save_res = client.post(f"/api/docs/{doc_id}/save", json={"target_path": str(out_pdf), "create_backup": True})
+    assert save_res.status_code == 200
+    assert out_pdf.exists()
+
+    doc_check = pymupdf.open(str(out_pdf))
+    try:
+        widgets = {w.field_name: w for w in (doc_check[0].widgets() or [])}
+        assert widgets["company_legal"].field_value == "Example Coastal LLC"
+        assert "Line 2 notes" in widgets["notes"].field_value
+        assert widgets["region"].field_value == "West"
+        assert widgets["dept"].field_value == "Dispatch"
+    finally:
+        doc_check.close()
+
+    # Undo reverts property update while keeping filled value; second Undo reverts fill
+    assert client.post(f"/api/docs/{doc_id}/undo").status_code == 200
+    insp_undo = client.get(f"/api/docs/{doc_id}/forms/inspect").json()
+    by_name_undo = {f["field_name"]: f for f in insp_undo["fields"]}
+    assert by_name_undo["company"]["value"] == "Example Coastal LLC"
+    assert client.post(f"/api/docs/{doc_id}/redo").status_code == 200

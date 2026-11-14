@@ -270,6 +270,10 @@ export default function App() {
   const [annotations, setAnnotations] = useState<AnnotationItem[]>([]);
   const [formFields, setFormFields] = useState<FormFieldItem[]>([]);
   const [formDraftValues, setFormDraftValues] = useState<Record<string, any>>({});
+  const formDraftValuesRef = useRef<Record<string, any>>({});
+  const [formDirtyByDoc, setFormDirtyByDoc] = useState<Record<string, boolean>>({});
+  const formDirtyRef = useRef<Record<string, boolean>>({});
+  const savedTargetDocsRef = useRef<Record<string, boolean>>({});
   const [bookmarks, setBookmarks] = useState<BookmarkItem[]>([]);
   const [attachments, setAttachments] = useState<AttachmentItem[]>([]);
   const [fontsList, setFontsList] = useState<FontItem[]>([]);
@@ -551,7 +555,10 @@ export default function App() {
             draftMap[String(f.xref)] = f.value;
           }
         });
-        setFormDraftValues(draftMap);
+        if (!formDirtyRef.current[docId]) {
+          formDraftValuesRef.current = draftMap;
+          setFormDraftValues(draftMap);
+        }
         setThumbnails(thumbsRes);
         setBookmarks(bmRes);
         setAttachments(attRes);
@@ -744,32 +751,97 @@ export default function App() {
     }
   };
 
+  const updateFormDraftValue = useCallback(
+    (docId: string, updater: (prev: Record<string, any>) => Record<string, any>) => {
+      const next = updater(formDraftValuesRef.current);
+      formDraftValuesRef.current = next;
+      setFormDraftValues(next);
+      formDirtyRef.current[docId] = true;
+      setFormDirtyByDoc((prev) => (prev[docId] ? prev : { ...prev, [docId]: true }));
+    },
+    []
+  );
+
+  const commitPendingFormValues = useCallback(
+    async (docId: string, force = false): Promise<DocumentSummary | null> => {
+      if (!force && !formDirtyRef.current[docId]) {
+        return null;
+      }
+      const res = await pdfApi.fillFormFields(docId, formDraftValuesRef.current, undefined, formAutoFit);
+      const warns = res.warnings || [];
+      setFormFillWarnings(warns);
+      formDirtyRef.current[docId] = false;
+      setFormDirtyByDoc((prev) => ({ ...prev, [docId]: false }));
+      if (warns.length > 0) {
+        notify(`Form values applied with ${warns.length} fitting/length warning(s).`, 'warn');
+      }
+      return res.summary;
+    },
+    [formAutoFit, notify]
+  );
+
+  // Auto-commit pending form values when switching modes (e.g., Fill Form <-> Prepare Form <-> Edit PDF)
+  useEffect(() => {
+    if (activeDoc && formDirtyRef.current[activeDoc.doc_id]) {
+      commitPendingFormValues(activeDoc.doc_id).catch(() => {});
+    }
+  }, [mode, formSubMode, activeDoc, commitPendingFormValues]);
+
+  const buildSuggestedSavePath = useCallback((filename: string, filePath?: string | null) => {
+    const baseName = filename || 'Document.pdf';
+    const dotIdx = baseName.toLowerCase().lastIndexOf('.pdf');
+    const stem = dotIdx >= 0 ? baseName.slice(0, dotIdx) : baseName;
+    const filledName = stem.endsWith('_filled') ? `${stem}.pdf` : `${stem}_filled.pdf`;
+    if (filePath && (filePath.includes('/') || filePath.includes('\\'))) {
+      const sep = filePath.includes('\\') && !filePath.includes('/') ? '\\' : '/';
+      const dir = filePath.slice(0, filePath.lastIndexOf(sep));
+      if (dir) return `${dir}${sep}${filledName}`;
+    }
+    return filledName;
+  }, []);
+
   const handleSave = async (saveAs = false) => {
     if (!activeDoc) return;
     try {
+      // BUG 1 FIX: Always commit pending in-memory form edits before writing to disk
+      if (formDirtyRef.current[activeDoc.doc_id]) {
+        await commitPendingFormValues(activeDoc.doc_id, true);
+      }
+
+      const hasExplicitDest = Boolean(savedTargetDocsRef.current[activeDoc.doc_id]);
       let targetPath = activeDoc.file_path;
-      if (saveAs || !targetPath) {
+
+      // BUG 3 FIX: On first save (or Save As), prompt native Save As dialog with _filled default
+      if (saveAs || !hasExplicitDest || !targetPath) {
+        const suggested = buildSuggestedSavePath(activeDoc.filename, activeDoc.file_path);
         if (window.vellumDesktop?.saveFileDialog) {
-          const picked = await window.vellumDesktop.saveFileDialog(activeDoc.filename);
-          if (!picked) return;
+          const picked = await window.vellumDesktop.saveFileDialog(suggested);
+          if (!picked) {
+            notify('Save canceled. In-memory edits preserved.', 'info');
+            return;
+          }
           targetPath = picked;
         } else {
-          // Download directly in browser mode or prompt path
+          // Download directly in browser mode with safe _filled name
+          const dlName = buildSuggestedSavePath(activeDoc.filename, null);
           const a = document.createElement('a');
           a.href = `${getApiBaseUrl()}/api/docs/${activeDoc.doc_id}/download`;
-          a.download = activeDoc.filename;
+          a.download = dlName;
           a.click();
-          notify(`Downloaded ${activeDoc.filename}`);
+          savedTargetDocsRef.current[activeDoc.doc_id] = true;
+          notify(`Downloaded ${dlName}`);
           return;
         }
       }
+
       const res = await pdfApi.saveDoc(activeDoc.doc_id, targetPath || undefined, true);
+      savedTargetDocsRef.current[activeDoc.doc_id] = true;
       await refreshDocState(activeDoc.doc_id, currentPage, res.summary);
       notify(
-        `Saved atomically to ${res.saved_path}${res.backup_path ? ` (Backup: ${res.backup_path})` : ''}`
+        `Saved ${res.summary.filename} atomically to ${res.saved_path}${res.backup_path ? ` (Backup: ${res.backup_path})` : ''}`
       );
     } catch (err: any) {
-      notify(`Save error: ${err.message}`, 'warn');
+      notify(`Save failed — destination left untouched: ${err.message}`, 'warn');
     }
   };
 
@@ -2639,7 +2711,7 @@ export default function App() {
               setSelectedImage(null);
             }}
           >
-            {doc.dirty && <span className="dirty-dot" title="Unsaved changes" />}
+            {(doc.dirty || formDirtyByDoc[doc.doc_id]) && <span className="dirty-dot" title="Unsaved changes" />}
             {doc.is_encrypted && <Lock size={12} color="#f59e0b" />}
             <span style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>{doc.filename}</span>
             <span style={{ fontSize: 10.5, opacity: 0.65 }}>({doc.page_count}p)</span>
@@ -2697,8 +2769,11 @@ export default function App() {
             <button className="tool-btn" onClick={handleRedo} disabled={!activeDoc?.can_redo} title="Redo (Ctrl+Y)">
               <Redo2 size={14} /> Redo ({activeDoc?.redo_count || 0})
             </button>
-            <button className="tool-btn primary" onClick={() => handleSave(false)} disabled={!activeDoc}>
+            <button className="tool-btn primary" onClick={() => handleSave(false)} disabled={!activeDoc} title="Save PDF (Ctrl+S)">
               <Save size={14} /> Save PDF
+            </button>
+            <button className="tool-btn" onClick={() => handleSave(true)} disabled={!activeDoc} title="Save PDF As (Ctrl+Shift+S)">
+              Save As
             </button>
           </div>
         </div>
@@ -2966,13 +3041,9 @@ export default function App() {
                   <button
                     className="tool-btn primary"
                     onClick={async () => {
-                      const res = await pdfApi.fillFormFields(activeDoc.doc_id, formDraftValues, undefined, formAutoFit);
-                      const warns = res.warnings || [];
-                      setFormFillWarnings(warns);
-                      await refreshDocState(activeDoc.doc_id, currentPage, res.summary);
-                      if (warns.length > 0) {
-                        notify(`Saved form values with ${warns.length} fitting/length warning(s).`, 'warn');
-                      } else {
+                      const summary = await commitPendingFormValues(activeDoc.doc_id, true);
+                      await refreshDocState(activeDoc.doc_id, currentPage, summary || activeDoc);
+                      if (!formFillWarnings.length) {
                         notify('Saved filled AcroForm field values into PDF stream.');
                       }
                     }}
@@ -3890,11 +3961,13 @@ export default function App() {
                               onKeyDown={handleFieldTabNav}
                               onChange={(e) => {
                                 const checked = e.target.checked;
-                                setFormDraftValues((prev) => ({
-                                  ...prev,
-                                  [fld.field_name]: checked,
-                                  [String(fld.xref)]: checked,
-                                }));
+                                if (activeDoc) {
+                                  updateFormDraftValue(activeDoc.doc_id, (prev) => ({
+                                    ...prev,
+                                    [fld.field_name]: checked,
+                                    [String(fld.xref)]: checked,
+                                  }));
+                                }
                               }}
                               style={{ width: '100%', height: '100%', cursor: fld.read_only ? 'not-allowed' : 'pointer' }}
                             />
@@ -3910,15 +3983,17 @@ export default function App() {
                               onKeyDown={handleFieldTabNav}
                               onChange={() => {
                                 const expVal = fld.export_value || 'Yes';
-                                setFormDraftValues((prev) => {
-                                  const next = { ...prev, [fld.field_name]: expVal };
-                                  formFields
-                                    .filter((other) => other.field_name === fld.field_name && other.field_type === 'radiobutton')
-                                    .forEach((other) => {
-                                      next[String(other.xref)] = other.xref === fld.xref;
-                                    });
-                                  return next;
-                                });
+                                if (activeDoc) {
+                                  updateFormDraftValue(activeDoc.doc_id, (prev) => {
+                                    const next = { ...prev, [fld.field_name]: expVal };
+                                    formFields
+                                      .filter((other) => other.field_name === fld.field_name && other.field_type === 'radiobutton')
+                                      .forEach((other) => {
+                                        next[String(other.xref)] = other.xref === fld.xref;
+                                      });
+                                    return next;
+                                  });
+                                }
                               }}
                               style={{ width: '100%', height: '100%', cursor: fld.read_only ? 'not-allowed' : 'pointer' }}
                             />
@@ -3932,11 +4007,13 @@ export default function App() {
                               onKeyDown={handleFieldTabNav}
                               onChange={(e) => {
                                 const val = e.target.value;
-                                setFormDraftValues((prev) => ({
-                                  ...prev,
-                                  [fld.field_name]: val,
-                                  [String(fld.xref)]: val,
-                                }));
+                                if (activeDoc) {
+                                  updateFormDraftValue(activeDoc.doc_id, (prev) => ({
+                                    ...prev,
+                                    [fld.field_name]: val,
+                                    [String(fld.xref)]: val,
+                                  }));
+                                }
                               }}
                               style={{ width: '100%', height: '100%', fontSize: Math.max(10, fieldFontSize), padding: 1 }}
                             >
@@ -3957,11 +4034,13 @@ export default function App() {
                               onKeyDown={handleFieldTabNav}
                               onChange={(e) => {
                                 const val = e.target.value;
-                                setFormDraftValues((prev) => ({
-                                  ...prev,
-                                  [fld.field_name]: val,
-                                  [String(fld.xref)]: val,
-                                }));
+                                if (activeDoc) {
+                                  updateFormDraftValue(activeDoc.doc_id, (prev) => ({
+                                    ...prev,
+                                    [fld.field_name]: val,
+                                    [String(fld.xref)]: val,
+                                  }));
+                                }
                               }}
                               style={{ width: '100%', height: '100%', fontSize: Math.max(10, fieldFontSize), padding: 1 }}
                             >
@@ -3982,11 +4061,13 @@ export default function App() {
                               onKeyDown={handleFieldTabNav}
                               onChange={(e) => {
                                 const val = e.target.value;
-                                setFormDraftValues((prev) => ({
-                                  ...prev,
-                                  [fld.field_name]: val,
-                                  [String(fld.xref)]: val,
-                                }));
+                                if (activeDoc) {
+                                  updateFormDraftValue(activeDoc.doc_id, (prev) => ({
+                                    ...prev,
+                                    [fld.field_name]: val,
+                                    [String(fld.xref)]: val,
+                                  }));
+                                }
                               }}
                               style={{
                                 width: '100%',
@@ -4012,11 +4093,13 @@ export default function App() {
                               onKeyDown={handleFieldTabNav}
                               onChange={(e) => {
                                 const val = e.target.value;
-                                setFormDraftValues((prev) => ({
-                                  ...prev,
-                                  [fld.field_name]: val,
-                                  [String(fld.xref)]: val,
-                                }));
+                                if (activeDoc) {
+                                  updateFormDraftValue(activeDoc.doc_id, (prev) => ({
+                                    ...prev,
+                                    [fld.field_name]: val,
+                                    [String(fld.xref)]: val,
+                                  }));
+                                }
                               }}
                               style={{
                                 width: '100%',
@@ -4064,6 +4147,9 @@ export default function App() {
                                       Math.abs(latestBbox[1] - origBbox[1]) > 0.5
                                     ) {
                                       try {
+                                        if (formDirtyRef.current[activeDoc.doc_id]) {
+                                          await commitPendingFormValues(activeDoc.doc_id, true);
+                                        }
                                         const res = await pdfApi.updateFormField(activeDoc.doc_id, fld.xref, {
                                           page_index: fld.page_index,
                                           bbox: latestBbox,
@@ -4128,6 +4214,9 @@ export default function App() {
                                       Math.abs(latestBbox[3] - origBbox[3]) > 0.5
                                     ) {
                                       try {
+                                        if (formDirtyRef.current[activeDoc.doc_id]) {
+                                          await commitPendingFormValues(activeDoc.doc_id, true);
+                                        }
                                         const res = await pdfApi.updateFormField(activeDoc.doc_id, fld.xref, {
                                           page_index: fld.page_index,
                                           bbox: latestBbox,
@@ -6009,6 +6098,10 @@ export default function App() {
                           className="tool-btn primary"
                           style={{ flex: 1 }}
                           onClick={async () => {
+                            if (formDirtyRef.current[activeDoc.doc_id]) {
+                              await commitPendingFormValues(activeDoc.doc_id, true);
+                            }
+                            const targetXref = selectedField.xref;
                             const res = await pdfApi.updateFormField(activeDoc.doc_id, selectedField.xref, {
                               page_index: selectedField.page_index,
                               field_name: selectedField.field_name,
@@ -6022,6 +6115,9 @@ export default function App() {
                               multiline: selectedField.multiline,
                             });
                             await refreshDocState(activeDoc.doc_id, currentPage, res.summary);
+                            const updatedInsp = await pdfApi.inspectFormFields(activeDoc.doc_id);
+                            const refreshed = (updatedInsp.fields || []).find((f) => f.xref === targetXref);
+                            if (refreshed) setSelectedField(refreshed);
                             notify(`Updated form field '${selectedField.field_name}'.`);
                           }}
                         >
@@ -6031,6 +6127,9 @@ export default function App() {
                           className="tool-btn"
                           title="Duplicate field"
                           onClick={async () => {
+                            if (formDirtyRef.current[activeDoc.doc_id]) {
+                              await commitPendingFormValues(activeDoc.doc_id, true);
+                            }
                             const res = await pdfApi.duplicateFormField(
                               activeDoc.doc_id,
                               selectedField.xref,
@@ -6046,6 +6145,9 @@ export default function App() {
                           className="tool-btn danger"
                           title="Delete field"
                           onClick={async () => {
+                            if (formDirtyRef.current[activeDoc.doc_id]) {
+                              await commitPendingFormValues(activeDoc.doc_id, true);
+                            }
                             const res = await pdfApi.deleteFormField(
                               activeDoc.doc_id,
                               selectedField.xref,

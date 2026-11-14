@@ -486,6 +486,20 @@ def update_form_field(
                         w.field_value = str(value)
                 w.update()
                 doc.xref_set_key(int(w.xref), "Ff", str(target_flags))
+                parent_info = doc.xref_get_key(int(w.xref), "Parent")
+                target_field_xref = int(w.xref)
+                if parent_info and parent_info[0] == "xref":
+                    try:
+                        target_field_xref = int(str(parent_info[1]).split()[0])
+                        doc.xref_set_key(target_field_xref, "Ff", str(target_flags))
+                    except Exception:
+                        target_field_xref = int(w.xref)
+                if field_name is not None and field_name.strip():
+                    esc_name = field_name.strip().replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
+                    doc.xref_set_key(target_field_xref, "T", f"({esc_name})")
+                if tooltip is not None:
+                    esc_tu = tooltip.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
+                    doc.xref_set_key(target_field_xref, "TU", f"({esc_tu})")
                 if align is not None and w.field_type == pymupdf.PDF_WIDGET_TYPE_TEXT:
                     _write_widget_align(doc, int(w.xref), align)
                 break
