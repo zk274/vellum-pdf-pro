@@ -191,7 +191,7 @@ async function run() {
     await sleep(500);
     const clickFillRes = await client.eval(`
       (() => {
-        const btn = Array.from(document.querySelectorAll('button')).find(b => b.textContent.includes('Fill / Select'));
+        const btn = Array.from(document.querySelectorAll('button')).find(b => b.textContent.trim() === 'Fill Form' || b.textContent.includes('Fill / Select'));
         if (!btn) return 'no-fill-btn';
         btn.click();
         return 'clicked:' + btn.textContent.trim();

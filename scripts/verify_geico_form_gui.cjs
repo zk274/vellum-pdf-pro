@@ -90,6 +90,8 @@ class CDPClient {
 
 async function run() {
   const rootDir = path.resolve(__dirname, '..');
+  const appImagePath = path.join(rootDir, 'release', 'Vellum_PDF_Pro-1.0.0-x86_64.AppImage');
+  const usePackaged = process.env.VELLUM_TEST_PACKAGED !== '0' && fs.existsSync(appImagePath);
   const electronBin = path.join(rootDir, 'node_modules', 'electron', 'dist', 'electron');
   const shotsDir = path.join(rootDir, 'docs', 'screenshots');
   const outDir = path.join(rootDir, 'tests', 'output');
@@ -109,11 +111,13 @@ async function run() {
   };
   delete spawnEnv.ELECTRON_RUN_AS_NODE;
 
-  const appProc = spawn(
-    electronBin,
-    ['--no-sandbox', `--remote-debugging-port=${cdpPort}`, path.join(rootDir, 'electron', 'main.cjs')],
-    { cwd: rootDir, env: spawnEnv, stdio: 'inherit' }
-  );
+  const launchCmd = usePackaged ? appImagePath : electronBin;
+  const launchArgs = usePackaged
+    ? ['--appimage-extract-and-run', '--no-sandbox', `--remote-debugging-port=${cdpPort}`]
+    : ['--no-sandbox', `--remote-debugging-port=${cdpPort}`, path.join(rootDir, 'electron', 'main.cjs')];
+  console.log('Launching GUI target:', launchCmd, usePackaged ? '(PACKAGED AppImage)' : '(Electron)');
+
+  const appProc = spawn(launchCmd, launchArgs, { cwd: rootDir, env: spawnEnv, stdio: 'inherit' });
 
   const cleanup = () => {
     try {
@@ -181,7 +185,7 @@ async function run() {
     await sleep(800);
     await client.screenshot(path.join(shotsDir, 'geico-original.png'));
 
-    // 3. Switch to Forms -> Detect Fields
+    // 3. Switch to Forms -> Prepare Form -> Detect Fields
     await client.eval(`
       (() => {
         const btn = Array.from(document.querySelectorAll('button')).find(b => b.textContent.trim() === 'Forms');
@@ -189,6 +193,13 @@ async function run() {
       })()
     `);
     await sleep(400);
+    await client.eval(`
+      (() => {
+        const btn = Array.from(document.querySelectorAll('button')).find(b => b.textContent.trim() === 'Prepare Form');
+        if (btn) btn.click();
+      })()
+    `);
+    await sleep(300);
     await client.eval(`
       (() => {
         const btn = Array.from(document.querySelectorAll('button')).find(b => b.textContent.includes('Detect Fields'));
@@ -202,14 +213,20 @@ async function run() {
       if (candCount >= 30) break;
       await sleep(300);
     }
-    console.log('Detected GEICO form candidate overlays:', candCount);
+    const toolbarState = await client.eval(`({
+      hasAcceptAll: Array.from(document.querySelectorAll('button')).some(b => b.textContent.includes('Accept All')),
+      hasConfirmSelected: Array.from(document.querySelectorAll('button')).some(b => b.textContent.includes('Confirm Selected')),
+      hasCancel: Array.from(document.querySelectorAll('button')).some(b => b.textContent.trim() === 'Cancel')
+    })`);
+    console.log('Detected GEICO form candidate overlays:', candCount, toolbarState);
     assert(candCount === 34, `Expected 34 GEICO candidate overlays, found ${candCount}`);
+    assert(toolbarState.hasAcceptAll && toolbarState.hasConfirmSelected && toolbarState.hasCancel, 'Expected Accept All, Confirm Selected, and Cancel in Prepare Form toolbar');
     await client.screenshot(path.join(shotsDir, 'geico-detected-candidates.png'));
 
     // 4. Click Accept All -> convert all 34 candidates into interactive AcroForm widgets
     await client.eval(`
       (() => {
-        const btn = Array.from(document.querySelectorAll('button')).find(b => b.textContent.trim() === 'Accept All');
+        const btn = Array.from(document.querySelectorAll('button')).find(b => b.textContent.includes('Accept All'));
         if (btn) btn.click();
       })()
     `);

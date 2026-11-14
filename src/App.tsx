@@ -332,6 +332,7 @@ export default function App() {
   const [formCandidates, setFormCandidates] = useState<FormFieldCandidate[]>([]);
   const [formFillWarnings, setFormFillWarnings] = useState<FormFillWarning[]>([]);
   const [formAutoFit, setFormAutoFit] = useState<boolean>(true);
+  const [formSubMode, setFormSubMode] = useState<'fill' | 'prepare'>('fill');
   const formWidgetRefs = useRef<Record<number, HTMLElement | null>>({});
 
   // Persistent Text Box Defaults (Black, Helvetica 11pt, Left, Transparent BG, No Border)
@@ -2933,67 +2934,174 @@ export default function App() {
 
           {mode === 'forms' && activeDoc && (
             <>
-              {(
-                [
-                  ['select', 'Fill / Select'],
-                  ['form-text', '+ Text'],
-                  ['form-multiline', '+ Multiline'],
-                  ['form-checkbox', '+ Checkbox'],
-                  ['form-radio', '+ Radio'],
-                  ['form-dropdown', '+ Dropdown'],
-                  ['form-listbox', '+ List Box'],
-                  ['form-signature', '+ Signature'],
-                ] as Array<[SubTool, string]>
-              ).map(([st, lbl]) => (
-                <button
-                  key={st}
-                  className={`tool-btn ${subTool === st ? 'active' : ''}`}
-                  onClick={() => setSubTool(st)}
-                >
-                  {lbl}
-                </button>
-              ))}
-              <div className="toolbar-divider" />
               <button
-                className="tool-btn"
-                onClick={async () => {
-                  const res = await pdfApi.detectFormCandidates(activeDoc.doc_id, currentPage);
-                  const cands = (res.candidates || []).map((c) => ({ ...c, accepted: true }));
-                  setFormCandidates(cands);
+                className={`tool-btn ${formSubMode === 'fill' ? 'primary' : ''}`}
+                onClick={() => {
+                  setFormSubMode('fill');
+                  setSubTool('select');
+                }}
+              >
+                Fill Form
+              </button>
+              <button
+                className={`tool-btn ${formSubMode === 'prepare' ? 'primary' : ''}`}
+                onClick={() => {
+                  setFormSubMode('prepare');
                   setRightOpen(true);
-                  notify(
-                    cands.length > 0
-                      ? `Detected ${cands.length} potential form field(s) on Page ${currentPage + 1}. Review & confirm in Inspector.`
-                      : `No static box/checkbox candidates detected on Page ${currentPage + 1}.`
-                  );
                 }}
               >
-                <Sparkles size={14} /> Detect Fields
+                Prepare Form
               </button>
-              <label style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 12, padding: '0 6px' }}>
-                <input
-                  type="checkbox"
-                  checked={formAutoFit}
-                  onChange={(e) => setFormAutoFit(e.target.checked)}
-                />
-                Auto-Fit Text
-              </label>
-              <button
-                className="tool-btn primary"
-                onClick={async () => {
-                  const res = await pdfApi.fillFormFields(activeDoc.doc_id, formDraftValues, undefined, formAutoFit);
-                  const warns = res.warnings || [];
-                  setFormFillWarnings(warns);
-                  await refreshDocState(activeDoc.doc_id, currentPage, res.summary);
-                  if (warns.length > 0) {
-                    notify(`Saved form values with ${warns.length} fitting/length warning(s).`, 'warn');
-                  } else {
-                    notify('Saved filled AcroForm field values into PDF stream.');
-                  }
-                }}
-              >
-                <CheckCircle2 size={14} /> Save Filled Values
-              </button>
+              <div className="toolbar-divider" />
+              {formSubMode === 'fill' ? (
+                <>
+                  <label style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 12, padding: '0 6px' }}>
+                    <input
+                      type="checkbox"
+                      checked={formAutoFit}
+                      onChange={(e) => setFormAutoFit(e.target.checked)}
+                    />
+                    Auto-Fit Text
+                  </label>
+                  <button
+                    className="tool-btn primary"
+                    onClick={async () => {
+                      const res = await pdfApi.fillFormFields(activeDoc.doc_id, formDraftValues, undefined, formAutoFit);
+                      const warns = res.warnings || [];
+                      setFormFillWarnings(warns);
+                      await refreshDocState(activeDoc.doc_id, currentPage, res.summary);
+                      if (warns.length > 0) {
+                        notify(`Saved form values with ${warns.length} fitting/length warning(s).`, 'warn');
+                      } else {
+                        notify('Saved filled AcroForm field values into PDF stream.');
+                      }
+                    }}
+                  >
+                    <CheckCircle2 size={14} /> Save Filled Values
+                  </button>
+                  {pageFormFields.length === 0 && (
+                    <button
+                      className="tool-btn"
+                      onClick={async () => {
+                        setFormSubMode('prepare');
+                        setSubTool('select');
+                        const res = await pdfApi.detectFormCandidates(activeDoc.doc_id, currentPage);
+                        const cands = (res.candidates || []).map((c) => ({ ...c, accepted: true }));
+                        setFormCandidates(cands);
+                        setRightOpen(true);
+                        notify(
+                          cands.length > 0
+                            ? `Switched to Prepare Form and detected ${cands.length} candidate field(s) on Page ${currentPage + 1}.`
+                            : `Switched to Prepare Form. No static candidates detected on Page ${currentPage + 1}.`
+                        );
+                      }}
+                    >
+                      <Sparkles size={14} /> Detect Fields
+                    </button>
+                  )}
+                </>
+              ) : (
+                <>
+                  <button
+                    className="tool-btn"
+                    onClick={async () => {
+                      const res = await pdfApi.detectFormCandidates(activeDoc.doc_id, currentPage);
+                      const cands = (res.candidates || []).map((c) => ({ ...c, accepted: true }));
+                      setFormCandidates(cands);
+                      setRightOpen(true);
+                      notify(
+                        cands.length > 0
+                          ? `Detected ${cands.length} potential form field(s) on Page ${currentPage + 1}. Review overlays or Inspector, then Confirm.`
+                          : `No static box/checkbox candidates detected on Page ${currentPage + 1}.`
+                      );
+                    }}
+                  >
+                    <Sparkles size={14} /> Detect Fields
+                  </button>
+                  {formCandidates.length > 0 && (
+                    <>
+                      <button
+                        className="tool-btn primary"
+                        onClick={async () => {
+                          let lastSummary = activeDoc;
+                          for (const c of formCandidates) {
+                            const res = await pdfApi.createFormField(activeDoc.doc_id, {
+                              page_index: c.page_index,
+                              field_type: c.field_type,
+                              field_name: c.field_name,
+                              bbox: c.bbox,
+                              multiline: c.field_type === 'multiline',
+                              tooltip: c.label,
+                              fill_color_hex: 'transparent',
+                              border_color_hex: 'transparent',
+                            });
+                            lastSummary = res.summary;
+                          }
+                          const count = formCandidates.length;
+                          setFormCandidates([]);
+                          setFormSubMode('fill');
+                          setSubTool('select');
+                          await refreshDocState(activeDoc.doc_id, currentPage, lastSummary);
+                          notify(`Accepted and inserted all ${count} detected form field(s).`);
+                        }}
+                      >
+                        Accept All ({formCandidates.length})
+                      </button>
+                      <button
+                        className="tool-btn"
+                        onClick={async () => {
+                          const selected = formCandidates.filter((c) => c.accepted !== false);
+                          let lastSummary = activeDoc;
+                          for (const c of selected) {
+                            const res = await pdfApi.createFormField(activeDoc.doc_id, {
+                              page_index: c.page_index,
+                              field_type: c.field_type,
+                              field_name: c.field_name,
+                              bbox: c.bbox,
+                              multiline: c.field_type === 'multiline',
+                              tooltip: c.label,
+                              fill_color_hex: 'transparent',
+                              border_color_hex: 'transparent',
+                            });
+                            lastSummary = res.summary;
+                          }
+                          setFormCandidates([]);
+                          setFormSubMode('fill');
+                          setSubTool('select');
+                          await refreshDocState(activeDoc.doc_id, currentPage, lastSummary);
+                          notify(`Inserted ${selected.length} confirmed form field(s).`);
+                        }}
+                      >
+                        Confirm Selected ({formCandidates.filter((c) => c.accepted !== false).length})
+                      </button>
+                      <button className="tool-btn" onClick={() => setFormCandidates([])}>
+                        Cancel
+                      </button>
+                    </>
+                  )}
+                  <div className="toolbar-divider" />
+                  {(
+                    [
+                      ['select', 'Select / Adjust'],
+                      ['form-text', '+ Text'],
+                      ['form-multiline', '+ Multiline'],
+                      ['form-checkbox', '+ Checkbox'],
+                      ['form-radio', '+ Radio'],
+                      ['form-dropdown', '+ Dropdown'],
+                      ['form-listbox', '+ List Box'],
+                      ['form-signature', '+ Signature'],
+                    ] as Array<[SubTool, string]>
+                  ).map(([st, lbl]) => (
+                    <button
+                      key={st}
+                      className={`tool-btn ${subTool === st ? 'active' : ''}`}
+                      onClick={() => setSubTool(st)}
+                    >
+                      {lbl}
+                    </button>
+                  ))}
+                </>
+              )}
             </>
           )}
 
@@ -3922,7 +4030,7 @@ export default function App() {
                               }}
                             />
                           )}
-                          {mode === 'forms' && selectedField?.xref === fld.xref && activeDoc && (
+                          {mode === 'forms' && formSubMode === 'prepare' && selectedField?.xref === fld.xref && activeDoc && (
                             <>
                               <div
                                 className="form-widget-move-handle"
@@ -4055,6 +4163,7 @@ export default function App() {
 
                 {/* Detected Form Field Candidates Overlay */}
                 {mode === 'forms' &&
+                  formSubMode === 'prepare' &&
                   formCandidates
                     .filter((c) => c.page_index === currentPage)
                     .map((cand) => {
@@ -4082,7 +4191,50 @@ export default function App() {
                             zIndex: 9,
                             boxSizing: 'border-box',
                           }}
-                        />
+                        >
+                          <div
+                            className="form-candidate-resize-handle"
+                            title="Drag to adjust candidate boundary"
+                            onClick={(e) => e.stopPropagation()}
+                            onMouseDown={(e) => {
+                              e.stopPropagation();
+                              e.preventDefault();
+                              const startX = e.clientX;
+                              const startY = e.clientY;
+                              const origBbox = [...cand.bbox] as [number, number, number, number];
+                              const onMove = (mv: MouseEvent) => {
+                                const dx = (mv.clientX - startX) / zoom;
+                                const dy = (mv.clientY - startY) / zoom;
+                                const nextBbox: [number, number, number, number] = [
+                                  origBbox[0],
+                                  origBbox[1],
+                                  Math.max(origBbox[0] + 12, origBbox[2] + dx),
+                                  Math.max(origBbox[1] + 10, origBbox[3] + dy),
+                                ];
+                                setFormCandidates((prev) =>
+                                  prev.map((c) => (c.id === cand.id ? { ...c, bbox: nextBbox } : c))
+                                );
+                              };
+                              const onUp = () => {
+                                window.removeEventListener('mousemove', onMove);
+                                window.removeEventListener('mouseup', onUp);
+                              };
+                              window.addEventListener('mousemove', onMove);
+                              window.addEventListener('mouseup', onUp);
+                            }}
+                            style={{
+                              position: 'absolute',
+                              right: -4,
+                              bottom: -4,
+                              width: 8,
+                              height: 8,
+                              background: isAccepted ? '#16a34a' : '#64748b',
+                              border: '1px solid #fff',
+                              borderRadius: 2,
+                              cursor: 'nwse-resize',
+                            }}
+                          />
+                        </div>
                       );
                     })}
 

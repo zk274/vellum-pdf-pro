@@ -56,7 +56,7 @@
 
 | Viewer / Engine | Tested? | Result |
 | :--- | :--- | :--- |
-| **Vellum PDF Pro (Electron GUI)** | Yes (`verify_geico_form_gui.cjs`) | All 34 candidate overlays detected, accepted, filled directly on canvas, saved, and reopened cleanly with all values & checkboxes intact. |
+| **Vellum PDF Pro (Packaged Linux AppImage)** | Yes (`verify_geico_form_gui.cjs` on `release/Vellum_PDF_Pro-1.0.0-x86_64.AppImage`) | Switched to **Forms → Prepare Form → Detect Fields**, verified **Accept All (34)** / **Confirm Selected (34)** / **Cancel** toolbar controls & 34 `.form-candidate-box` overlays, converted all 34 widgets, filled directly in **Fill Form** mode, saved, and reopened cleanly. |
 | **PyMuPDF (`fitz`)** | Yes (`test_geico_form_validation.py`) | Verified 34 widgets, saved field values, checkbox states, and preserved static labels/footer. |
 | **pypdfium2** | Yes (`test_geico_form_validation.py`) | Rendered completed form at `1.5×` scale cleanly (`>800×1000 px`). |
 | **Poppler (`pdftotext` & `pdftoppm`)** | Yes (`test_geico_form_validation.py`) | `pdftotext` preserved all static text; `pdftoppm -png -r 120` rendered all filled text and checkbox marks cleanly with zero clipping. |
