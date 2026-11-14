@@ -2167,16 +2167,39 @@ def edit_paragraph_block(
         collides_if_expanded = required_height > max_safe_height + 1.5
 
         if new_text.strip() and required_height > box_height + 2.5:
-            if overflow_policy == "check":
-                # Compute suggested font size that fits box_height
-                suggested_fs = None
+            def _compute_suggested_font_size() -> Optional[float]:
                 fs_try = round(eff_font_size - 0.5, 1)
                 while fs_try >= 6.0:
                     _, h_try, _ = measure_for_size(fs_try)
                     if h_try <= box_height + 1.5:
-                        suggested_fs = fs_try
-                        break
+                        return fs_try
                     fs_try = round(fs_try - 0.5, 1)
+                return None
+
+            def _overflow_message(suggested_fs: Optional[float]) -> str:
+                if collides_if_expanded and suggested_fs is None:
+                    return (
+                        f"Text requires {round(required_height, 1)} pt but box has {round(box_height, 1)} pt "
+                        "and cannot fit without shrinking below the 6.0 pt readability limit or overlapping "
+                        "adjacent content. Shorten the text or widen the column/cell."
+                    )
+                if collides_if_expanded:
+                    return (
+                        f"Expanding to {round(required_height, 1)} pt would overlap adjacent content; "
+                        f"use Fit Font ({suggested_fs} pt) or shorten the text."
+                    )
+                if suggested_fs is None:
+                    return (
+                        f"Text requires {round(required_height, 1)} pt (box has {round(box_height, 1)} pt) "
+                        "and cannot fit at the 6.0 pt readability limit without expanding the box."
+                    )
+                return (
+                    f"Overflow: requires {round(required_height, 1)} pt height "
+                    f"(box has {round(box_height, 1)} pt)."
+                )
+
+            if overflow_policy == "check":
+                suggested_fs = _compute_suggested_font_size()
                 return {
                     "status": "overflow",
                     "pdf_bytes": pdf_bytes,
@@ -2187,11 +2210,14 @@ def edit_paragraph_block(
                         "can_expand_safely": not collides_if_expanded,
                         "collides_with_neighbors": collides_if_expanded,
                         "suggested_font_size": suggested_fs,
+                        "min_readable_font_size": 6.0,
                         "wrapped_line_count": len(wrapped_lines),
+                        "message": _overflow_message(suggested_fs),
                     },
                 }
             elif overflow_policy == "expand_box":
                 if collides_if_expanded:
+                    suggested_fs = _compute_suggested_font_size()
                     return {
                         "status": "overflow",
                         "pdf_bytes": pdf_bytes,
@@ -2201,8 +2227,10 @@ def edit_paragraph_block(
                             "max_safe_expand_height": round(max_safe_height, 1),
                             "can_expand_safely": False,
                             "collides_with_neighbors": True,
-                            "suggested_font_size": None,
+                            "suggested_font_size": suggested_fs,
+                            "min_readable_font_size": 6.0,
                             "wrapped_line_count": len(wrapped_lines),
+                            "message": _overflow_message(suggested_fs),
                         },
                     }
                 disp_target[3] = round(disp_target[1] + required_height + 2.0, 2)
@@ -2231,7 +2259,9 @@ def edit_paragraph_block(
                             "can_expand_safely": not collides_if_expanded,
                             "collides_with_neighbors": collides_if_expanded,
                             "suggested_font_size": None,
+                            "min_readable_font_size": 6.0,
                             "wrapped_line_count": len(wrapped_lines),
+                            "message": _overflow_message(None),
                         },
                     }
 

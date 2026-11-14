@@ -61,22 +61,31 @@ Every fixture records explicit provenance (`origin`):
 
 ---
 
-## 5. Ranked Engineering Findings & Recommendations
+## 5. Engineering Findings & Resolutions
 
-1. **P2 — Tight Spreadsheet Cell Wrapping (`lo_calc_real`)**:
-   - *Observation*: When editing a single-line LibreOffice Calc cell (`11.2pt` tall, `1pt` row spacing) with text that wraps onto 2 lines, `expand_box` refuses to overlap the row below and `shrink_font` hits its minimum readable font floor (`6.5pt`), returning `status: "overflow"`.
-   - *Recommendation*: Offer a "Compact single-line horizontal scale" or clear UI guidance ("Text exceeds single-row cell height; shorten text or widen column") in the overflow banner for table cells.
-2. **P3 — Redaction API Schema Clarity (`RedactRequest`)**:
-   - *Observation*: `RedactRequest.page_redactions` expects `[{"page_index": 0, "bbox": [x0, y0, x1, y1]}]` (`bbox`, not `rects`). Passing `rects` silently yields `redacted_regions_count: 0` because extra dict keys are ignored.
-   - *Recommendation*: Validate `page_redactions` items with a typed Pydantic model (`PageRedactionItem`) so malformed keys fail fast with HTTP `422` instead of a 0-region no-op.
-3. **P3 — Pre-existing TypeScript Debt in `src/App.tsx`**:
-   - *Observation*: `npx tsc --noEmit` still reports 16 pre-existing type errors in older handlers of `src/App.tsx` (lines 521–3045), though all new code (`src/richTextUtils.ts`, `src/types.ts`, and mixed-format/paragraph sections) has `0` TS errors and `vite build` succeeds cleanly.
+1. **P2 — Tight Spreadsheet Cell Wrapping (`lo_calc_real`) — RESOLVED**:
+   - *Root Cause*: When editing a single-line spreadsheet cell (`11.2pt` tall, `1pt` row spacing) with text that wraps onto multiple lines, `expand_box` refuses to overlap adjacent rows and `shrink_font` enforces a `6.0pt` readability floor.
+   - *Fix*: Added `_compute_suggested_font_size()` and `_overflow_message()` in `backend/engine/direct_edit.py` (`edit_paragraph_block`) plus `min_readable_font_size: 6.0` and `message` in `ParagraphOverflowInfo` (`src/types.ts`, `.paragraph-overflow-banner` in `src/App.tsx`). When text cannot fit without shrinking below `6.0pt` or overlapping neighbors, original text/formatting/bytes are preserved untouched and an actionable message instructs the user to shorten the text or widen the column/cell.
+   - *Regression Test*: `test_tight_spreadsheet_cell_overflow_readability_guard` in `tests/test_pdf_compatibility_matrix.py`.
+2. **P3 — Redaction API Schema Strictness (`RedactRequest`) — RESOLVED**:
+   - *Root Cause*: `RedactRequest.page_redactions` accepted untyped `Dict[str, Any]` items, allowing misnamed keys (e.g. `rects` instead of `bbox`) to silently process `0` regions.
+   - *Fix*: Added `PageRedactionItem(BaseModel)` with `ConfigDict(extra="forbid")`, `page_index >= 0`, 4-element `bbox` with `x1 > x0` and `y1 > y0`, and `RedactRequest` `ConfigDict(extra="forbid")` + `validate_non_empty_targets` in `backend/app.py`. Invalid or empty redaction payloads now fail fast with HTTP `422`.
+   - *Regression Test*: `test_strict_redaction_validation_and_permanent_purge` in `tests/test_pdf_compatibility_matrix.py`.
+3. **P3 — Pre-existing TypeScript Errors in `src/App.tsx` — RESOLVED**:
+   - *Fix*: Resolved all 16 pre-existing TypeScript errors in `src/App.tsx` (`notify(..., 'warn')`, `searchInputRef.current?.focus()`, `pdfApi.insertBlankPage`, `pdfApi.rotatePages`, `VellumBoxObject` `font`/`size`/`color` fields, and `pdfApi.decryptPdf(activeDoc.doc_id, '')`) without altering behavior. `npx tsc --noEmit` now exits `0` with `0` errors.
+
+### Remaining Limitations
+- **Native Microsoft Word / Excel Exports**: Not tested directly on this Linux host because Microsoft Office binaries are unavailable (`NOT TESTED` in matrix; synthetic Office-style layout tested instead).
+- **Subset Font Re-encoding**: Newly typed characters missing from an embedded subset font fall back to `DejaVu Sans` / Base-14 with `font_warnings` (or fail cleanly when `font_fallback_policy="refuse"`).
 
 ---
 
 ## 6. Test & Build Summary
 
-- **Full Backend/API & Compatibility Suite** (`.venv/bin/pytest -v tests/`): **25 passed, 0 failed** in `83.12s` (includes `test_real_world_and_synthetic_compatibility_matrix`, `test_crash_recovery_journal`, `test_object_selection_moving_resizing_and_persistence`, `test_mixed_format_paragraph_runs_unicode_and_safety`, etc.).
-- **Frontend Production Build** (`npm run build`): Exited `0` (`dist/assets/index-B_azhT9j.js`, `dist/assets/index-Ct1vFAN5.css`).
+- **Full Backend/API & Compatibility Suite** (`.venv/bin/pytest -v tests/`): **27 passed, 0 failed** in `78.65s`.
+- **TypeScript Typecheck & Frontend Production Build** (`npx tsc --noEmit && npm run build`): Exited `0` with **0 TypeScript errors** (`dist/assets/index-8UqIioh2.js`, `dist/assets/index-Ct1vFAN5.css`).
 - **Packaged AppImage GUI Smoke Test** (`DISPLAY=:0 node scripts/verify_mixed_format_gui.cjs`): **ALL MIXED-FORMAT GUI CHECKS PASSED!** (exited `0`).
+- **Packaged Artifacts (`bash scripts/build_packages.sh`)**:
+  - `cd093f5aef4207afc669e77f08400e18865e29c04a6ddfc42ee8b97cb3c67fca  release/vellum-pdf-pro_1.0.0_amd64.deb` (`450M`)
+  - `88af9cbafd5ec40202a57d130636aac7760cbc0f9e52bc51526e8f66a4741d5f  release/Vellum_PDF_Pro-1.0.0-x86_64.AppImage` (`389M`)
 

@@ -216,7 +216,9 @@ export interface ParagraphOverflowInfo {
   can_expand_safely: boolean;
   collides_with_neighbors: boolean;
   suggested_font_size: number | null;
+  min_readable_font_size?: number;
   wrapped_line_count: number;
+  message?: string;
 }
 
 export interface EditParagraphResponse {

@@ -519,7 +519,7 @@ export default function App() {
         const rec = await pdfApi.listRecovery();
         setRecoveryList(rec);
       } catch (docErr: any) {
-        notify(`Failed to load initial document: ${docErr.message}`, 'error');
+        notify(`Failed to load initial document: ${docErr.message}`, 'warn');
       }
     } else {
       setEngineReady(false);
@@ -531,7 +531,7 @@ export default function App() {
       } else {
         setBackendErrorDetail(`Unable to reach backend at ${getApiBaseUrl()}/api/health after ${maxAttempts} attempts.`);
       }
-      notify('Backend connection could not be established. Click Retry in the status bar.', 'error');
+      notify('Backend connection could not be established. Click Retry in the status bar.', 'warn');
     }
   }, [notify, refreshDocState]);
 
@@ -856,36 +856,28 @@ export default function App() {
           openDocumentPropertiesModal();
           break;
         case 'focus-search':
-          setShowSearch(true);
+          searchInputRef.current?.focus();
           break;
         case 'insert-blank-page':
           if (activeDoc) {
             try {
-              const res = await pdfApi.insertBlankPage(activeDoc.doc_id, {
-                target_page_index: currentPage + 1,
-                page_count: 1,
-              });
+              const res = await pdfApi.insertBlankPage(activeDoc.doc_id, currentPage + 1);
               setOpenDocs((prev) => prev.map((d) => (d.doc_id === activeDoc.doc_id ? res : d)));
               setCurrentPage((p) => p + 1);
-              await refreshThumbnails(activeDoc.doc_id);
-              await refreshDocState(activeDoc.doc_id);
+              await refreshDocState(activeDoc.doc_id, currentPage + 1, res);
             } catch (err: any) {
-              setApiError(`Failed to insert blank page: ${err?.message || err}`);
+              notify(`Failed to insert blank page: ${err?.message || err}`, 'warn');
             }
           }
           break;
         case 'rotate-page-cw':
           if (activeDoc) {
             try {
-              const res = await pdfApi.rotatePages(activeDoc.doc_id, {
-                page_indices: [currentPage],
-                angle: 90,
-              });
+              const res = await pdfApi.rotatePages(activeDoc.doc_id, [currentPage], 90);
               setOpenDocs((prev) => prev.map((d) => (d.doc_id === activeDoc.doc_id ? res : d)));
-              await refreshThumbnails(activeDoc.doc_id);
-              await refreshDocState(activeDoc.doc_id);
+              await refreshDocState(activeDoc.doc_id, currentPage, res);
             } catch (err: any) {
-              setApiError(`Failed to rotate page: ${err?.message || err}`);
+              notify(`Failed to rotate page: ${err?.message || err}`, 'warn');
             }
           }
           break;
@@ -1229,9 +1221,9 @@ export default function App() {
     setDraftTextBox({
       bbox: [...box.bbox],
       text: box.text,
-      font: box.font_name || 'helv',
-      size: box.font_size || 12,
-      color: box.color_hex || '#000000',
+      font: box.font || 'helv',
+      size: box.size || 12,
+      color: box.color || '#000000',
       bold: Boolean(box.bold),
       italic: Boolean(box.italic),
       align: (box.align as any) || 'left',
@@ -3039,11 +3031,11 @@ export default function App() {
                   className="tool-btn danger"
                   onClick={async () => {
                     try {
-                      const res = await pdfApi.decryptPdf(activeDoc.doc_id, { password: '' });
+                      const res = await pdfApi.decryptPdf(activeDoc.doc_id, '');
                       await refreshDocState(activeDoc.doc_id, currentPage, res);
                       notify('Removed password encryption from this document.');
                     } catch (err: any) {
-                      setApiError(`Failed to decrypt document: ${err?.message || err}`);
+                      notify(`Failed to decrypt document: ${err?.message || err}`, 'warn');
                     }
                   }}
                 >
@@ -3892,11 +3884,15 @@ export default function App() {
                         <div className="paragraph-overflow-msg">
                           <AlertTriangle size={13} />
                           <span>
-                            Overflow: requires {draftParagraph.overflowInfo.required_height} pt height (box has{' '}
-                            {draftParagraph.overflowInfo.available_height} pt).
-                            {draftParagraph.overflowInfo.collides_with_neighbors
-                              ? ' Expanding further would overlap neighboring content.'
-                              : ''}
+                            {draftParagraph.overflowInfo.message || (
+                              <>
+                                Overflow: requires {draftParagraph.overflowInfo.required_height} pt height (box has{' '}
+                                {draftParagraph.overflowInfo.available_height} pt).
+                                {draftParagraph.overflowInfo.collides_with_neighbors
+                                  ? ' Expanding further would overlap neighboring content.'
+                                  : ''}
+                              </>
+                            )}
                           </span>
                         </div>
                         <div className="paragraph-overflow-actions">

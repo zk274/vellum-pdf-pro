@@ -12,7 +12,7 @@ from typing import Any, Dict, List, Optional
 
 from fastapi import FastAPI, File, Form, HTTPException, Query, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 import pymupdf
 
 from .engine.annotations import add_annotation, delete_annotation, list_annotations, update_annotation
@@ -407,13 +407,40 @@ class DecryptRequest(BaseModel):
     password: str = ""
 
 
+class PageRedactionItem(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    page_index: int = Field(ge=0)
+    bbox: List[float] = Field(min_length=4, max_length=4)
+    label: Optional[str] = None
+
+    @model_validator(mode="after")
+    def validate_bbox_order(self) -> "PageRedactionItem":
+        if self.bbox[2] <= self.bbox[0] or self.bbox[3] <= self.bbox[1]:
+            raise ValueError("Redaction bbox must have x1 > x0 and y1 > y0.")
+        return self
+
+
 class RedactRequest(BaseModel):
-    page_redactions: Optional[List[Dict[str, Any]]] = None
+    model_config = ConfigDict(extra="forbid")
+
+    page_redactions: Optional[List[PageRedactionItem]] = None
     search_terms: Optional[List[str]] = None
     regex_pattern: Optional[str] = None
     fill_color_hex: str = "#000000"
     overlay_text: str = "REDACTED"
     text_color_hex: str = "#ffffff"
+
+    @model_validator(mode="after")
+    def validate_non_empty_targets(self) -> "RedactRequest":
+        has_regions = bool(self.page_redactions)
+        has_terms = bool([t for t in (self.search_terms or []) if str(t).strip()])
+        has_regex = bool(self.regex_pattern and self.regex_pattern.strip())
+        if not (has_regions or has_terms or has_regex):
+            raise ValueError(
+                "At least one redaction target (page_redactions, search_terms, or regex_pattern) is required."
+            )
+        return self
 
 
 class DocumentPropertiesRequest(BaseModel):
@@ -1570,7 +1597,7 @@ def api_redact_pdf(doc_id: str, req: RedactRequest) -> Dict[str, Any]:
     session = session_manager.get_session(doc_id)
     res = apply_permanent_redaction(
         pdf_bytes=session.pdf_bytes,
-        page_redactions=req.page_redactions,
+        page_redactions=[item.model_dump() for item in req.page_redactions] if req.page_redactions else None,
         search_terms=req.search_terms,
         regex_pattern=req.regex_pattern,
         fill_color_hex=req.fill_color_hex,
