@@ -341,6 +341,7 @@ class CreateFormFieldRequest(BaseModel):
     align: str = "left"
     font_name: str = "helv"
     tooltip: str = ""
+    export_value: str = ""
 
 
 class FillFormFieldsRequest(BaseModel):
@@ -1320,6 +1321,7 @@ def api_create_form_field(doc_id: str, req: CreateFormFieldRequest) -> Dict[str,
         align=req.align,
         font_name=req.font_name,
         tooltip=req.tooltip,
+        export_value=req.export_value,
     )
     session_manager.update_session(doc_id, new_bytes, action=f"Create Form Field ({req.field_name})")
     return {

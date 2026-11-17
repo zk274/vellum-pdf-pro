@@ -61,10 +61,10 @@ def test_nsd_16page_manifest_scoring_conversion_fill_save_reopen():
     assert open_res.status_code == 200
     doc_id = open_res.json()["doc_id"]
 
-    # Scan key representative pages via API (image-based p1, p2, p3; contract p4, p5; vector p7; initials p12; ACH p14; ACORD p15; rate table p16)
+    # Scan all 16 pages via API
     page_reports: Dict[int, Dict] = {}
     used_names: List[str] = []
-    for p_idx in [0, 1, 2, 3, 4, 6, 11, 13, 14, 15]:
+    for p_idx in range(16):
         res = client.post(
             f"/api/docs/{doc_id}/forms/detect-candidates",
             json={"page_index": p_idx, "used_names": used_names},
@@ -93,12 +93,18 @@ def test_nsd_16page_manifest_scoring_conversion_fill_save_reopen():
     # Page 3: service area checkboxes + comments/acknowledgement
     assert len(page_reports[2]["candidates"]) >= 6
 
-    # Page 4 & 5: dense contract prose -> 0 false positives over legal text
-    assert len(page_reports[3]["candidates"]) == 0
-    assert len(page_reports[4]["candidates"]) == 0
+    # Page 4: 4 genuine opening-paragraph blanks (day, month, year, provider name), 0 prose false positives
+    p4_cands = page_reports[3]["candidates"]
+    assert len(p4_cands) == 4, f"Expected 4 blanks on p4, got {len(p4_cands)}: {[c['field_name'] for c in p4_cands]}"
+    p4_names = {c["field_name"] for c in p4_cands}
+    assert {"effective_day", "effective_month", "effective_year", "provider_name"} <= p4_names
+
+    # Page 5, 6, 8, 9, 10, 11: dense contract prose -> 0 false positives
+    for prose_idx in (4, 5, 7, 8, 9, 10):
+        assert len(page_reports[prose_idx]["candidates"]) == 0, f"False positive on p{prose_idx+1}: {page_reports[prose_idx]['candidates']}"
 
     # Page 7: vector-outlined signature block -> 6 signature/name/title fields
-    assert len(page_reports[6]["candidates"]) >= 4
+    assert len(page_reports[6]["candidates"]) == 6
 
     # Page 12: 5 "(Initial)" fields detected, zero digit false positives
     p12_cands = page_reports[11]["candidates"]
@@ -106,21 +112,34 @@ def test_nsd_16page_manifest_scoring_conversion_fill_save_reopen():
     assert all("initial" in c["field_name"] for c in p12_cands)
     assert all(c["field_type"] == "text" for c in p12_cands)
 
-    # Page 14: ACH banking form
-    p14_names = " ".join(c["field_name"] for c in page_reports[13]["candidates"])
+    # Page 13: 4 signature/title fields, zero Roman-numeral false positives
+    assert len(page_reports[12]["candidates"]) == 4
+
+    # Page 14: ACH banking form (13 fields, no bottom artifact)
+    p14_cands = page_reports[13]["candidates"]
+    assert len(p14_cands) == 13
+    p14_names = " ".join(c["field_name"] for c in p14_cands)
     assert "company_name" in p14_names
     assert "depository_name" in p14_names
+    assert "field_1" not in p14_names
 
     # Page 15: miniature ACORD 25 example thumbnail -> 0 false positives
     assert len(page_reports[14]["candidates"]) == 0
 
-    # Page 16: landscape rate table -> individual cells (> 100 rate + initial cells)
+    # Page 16: landscape rate table -> 121 clean cells (Name of Business + 110 rate cells + 10 Initials)
     p16_cands = page_reports[15]["candidates"]
-    assert len(p16_cands) >= 100
+    assert len(p16_cands) == 121, f"Expected 121 cells on p16, got {len(p16_cands)}"
     assert all((c["bbox"][2] - c["bbox"][0]) <= 200 for c in p16_cands if "electric_js" in c["field_name"])
+    logo_r = pymupdf.Rect(50.4, 57.7, 240.3, 92.9)
+    p16_rects = [pymupdf.Rect(c["bbox"]) for c in p16_cands]
+    assert all((r & logo_r).is_empty for r in p16_rects), "Page 16 field overlaps NSD logo"
+    for a in range(len(p16_rects)):
+        for b in range(a + 1, len(p16_rects)):
+            inter = p16_rects[a] & p16_rects[b]
+            assert inter.is_empty or inter.get_area() <= 0.5, f"Page 16 cell overlap: {p16_cands[a]['field_name']} vs {p16_cands[b]['field_name']}"
 
-    # Convert Page 1 candidates into real AcroForm widgets
-    for c in p1_cands:
+    # Convert Page 1, Page 4, and Page 12 candidates into real AcroForm widgets
+    for c in p1_cands + p4_cands + p12_cands:
         cr = client.post(
             f"/api/docs/{doc_id}/forms/create",
             json={
@@ -154,6 +173,17 @@ def test_nsd_16page_manifest_scoring_conversion_fill_save_reopen():
     )
     assert fill_res.status_code == 200
 
+    p4_fill = {
+        "effective_day": "17",
+        "effective_month": "November",
+        "effective_year": "26",
+        "provider_name": "Example Roadside Recovery LLC",
+    }
+    assert client.post(f"/api/docs/{doc_id}/forms/fill", json={"page_index": 3, "values": p4_fill, "auto_fit": True}).status_code == 200
+
+    p12_fill = {c["field_name"]: f"ER{idx}" for idx, c in enumerate(p12_cands, start=1)}
+    assert client.post(f"/api/docs/{doc_id}/forms/fill", json={"page_index": 11, "values": p12_fill, "auto_fit": True}).status_code == 200
+
     save_res = client.post(
         f"/api/docs/{doc_id}/save",
         json={"target_path": str(fillable_out), "create_backup": False},
@@ -170,6 +200,13 @@ def test_nsd_16page_manifest_scoring_conversion_fill_save_reopen():
         assert w_map["legal_business_name"].field_value == "Example Roadside Recovery LLC"
         assert w_map["business_address"].field_value == "123 Example Boulevard"
         assert w_map["city"].field_value == "Exampleton"
+        w_map_p4 = {w.field_name: w.field_value for w in (reopened[3].widgets() or [])}
+        for k, v in p4_fill.items():
+            assert w_map_p4.get(k) == v, f"P4 field {k} expected {v!r}, got {w_map_p4.get(k)!r}"
+        w_map_p12 = {w.field_name: w.field_value for w in (reopened[11].widgets() or [])}
+        assert len(w_map_p12) == 5
+        for k, v in p12_fill.items():
+            assert w_map_p12.get(k) == v, f"P12 initial {k} expected {v!r}, got {w_map_p12.get(k)!r}"
     finally:
         reopened.close()
 

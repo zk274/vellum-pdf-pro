@@ -107,9 +107,10 @@ async function run() {
   const origNsdHash = sha256(nsdPdf);
   const nsdOutPdf = path.join(outDir, 'NNSDFILLABLEAPP_1_fillable.pdf');
   if (fs.existsSync(nsdOutPdf)) fs.unlinkSync(nsdOutPdf);
-
+  const multiOutPdf = path.join(outDir, 'NNSDFILLABLEAPP_multipage_verified.pdf');
+  if (fs.existsSync(multiOutPdf)) fs.unlinkSync(multiOutPdf);
   const dialogQueueFile = path.join(outDir, 'test_nsd_dialog_queue.json');
-  fs.writeFileSync(dialogQueueFile, JSON.stringify({ calls: [], queue: [nsdOutPdf] }));
+  fs.writeFileSync(dialogQueueFile, JSON.stringify({ calls: [], queue: [nsdOutPdf, multiOutPdf] }));
 
   const cdpPort = 9250;
   const backendPort = 18450;
@@ -338,10 +339,195 @@ async function run() {
       })()
     `);
     await sleep(600);
-    await jumpAndDetect(2, 40, 90, 'nsd-page2-nav-and-yesno.png');
-    await jumpAndDetect(4, 0, 0, 'nsd-p4-clean.png');
+    await jumpAndDetect(2, 65, 65, 'nsd-page2-nav-and-yesno.png');
+    // Accept Page 2 candidates and test real GUI Yes/No radio + checkbox interactions
+    await client.eval(`Array.from(document.querySelectorAll('button')).find(b => b.textContent.trim().startsWith('Accept All ('))?.click()`);
+    for (let i = 0; i < 120; i++) {
+      const wCnt = await client.eval(`document.querySelectorAll('.form-widget-box').length`);
+      const cCnt = await client.eval(`document.querySelectorAll('.form-candidate-box').length`);
+      if (wCnt >= 65 && cCnt === 0) break;
+      await sleep(250);
+    }
+    await client.eval(`Array.from(document.querySelectorAll('button')).find(b => b.textContent.trim() === 'Fill Form')?.click()`);
+    for (let i = 0; i < 20; i++) {
+      const rCnt = await client.eval(`document.querySelectorAll('.form-widget-box input[type="radio"]').length`);
+      if (rCnt >= 8) break;
+      await sleep(200);
+    }
+    await client.eval(`
+      (() => {
+        const radios = Array.from(document.querySelectorAll('.form-widget-box input[type="radio"]'));
+        if (radios.length >= 1) radios[0].click();
+      })()
+    `);
+    await sleep(150);
+    await client.eval(`
+      (() => {
+        const radios = Array.from(document.querySelectorAll('.form-widget-box input[type="radio"]'));
+        const cbs = Array.from(document.querySelectorAll('.form-widget-box input[type="checkbox"]'));
+        if (radios.length >= 2) radios[1].click();
+        if (cbs.length >= 2) { cbs[0].click(); cbs[1].click(); }
+      })()
+    `);
+    await sleep(200);
+    const p2Interactive = await client.eval(`
+      (() => {
+        const radios = Array.from(document.querySelectorAll('.form-widget-box input[type="radio"]'));
+        const cbs = Array.from(document.querySelectorAll('.form-widget-box input[type="checkbox"]'));
+        return {
+          radioCount: radios.length,
+          cbCount: cbs.length,
+          r0Checked: radios[0]?.checked || false,
+          r1Checked: radios[1]?.checked || false,
+          c0Checked: cbs[0]?.checked || false,
+          c1Checked: cbs[1]?.checked || false,
+        };
+      })()
+    `);
+    console.log('NSD Page 2 interactive state:', p2Interactive);
+    assert(p2Interactive.radioCount >= 8 && !p2Interactive.r0Checked && p2Interactive.r1Checked, 'Page 2 radio mutual exclusion failed');
+    assert(p2Interactive.cbCount >= 40 && p2Interactive.c0Checked && p2Interactive.c1Checked, 'Page 2 independent checkboxes failed');
+
+    await jumpAndDetect(4, 4, 4, 'nsd-p4-clean.png');
+    await client.eval(`Array.from(document.querySelectorAll('button')).find(b => b.textContent.trim().startsWith('Accept All ('))?.click()`);
+    for (let i = 0; i < 40; i++) {
+      const wCnt = await client.eval(`document.querySelectorAll('.form-widget-box').length`);
+      const cCnt = await client.eval(`document.querySelectorAll('.form-candidate-box').length`);
+      if (wCnt >= 4 && cCnt === 0) break;
+      await sleep(200);
+    }
+    await client.eval(`Array.from(document.querySelectorAll('button')).find(b => b.textContent.trim() === 'Fill Form')?.click()`);
+    await sleep(200);
+    await client.eval(`
+      (() => {
+        const setVal = (el, val) => {
+          const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+          setter.call(el, val);
+          el.dispatchEvent(new Event('input', { bubbles: true }));
+          el.dispatchEvent(new Event('blur', { bubbles: true }));
+        };
+        const inputs = Array.from(document.querySelectorAll('.form-widget-box input'));
+        ['17', 'November', '26', 'Example Roadside Recovery LLC'].forEach((v, idx) => {
+          if (inputs[idx]) setVal(inputs[idx], v);
+        });
+      })()
+    `);
+    await sleep(300);
+
     await jumpAndDetect(12, 5, 5, 'nsd-p12-initials.png');
-    await jumpAndDetect(16, 100, 150, 'nsd-p16-table.png');
+    await client.eval(`Array.from(document.querySelectorAll('button')).find(b => b.textContent.trim().startsWith('Accept All ('))?.click()`);
+    for (let i = 0; i < 40; i++) {
+      const wCnt = await client.eval(`document.querySelectorAll('.form-widget-box').length`);
+      const cCnt = await client.eval(`document.querySelectorAll('.form-candidate-box').length`);
+      if (wCnt >= 5 && cCnt === 0) break;
+      await sleep(200);
+    }
+    await client.eval(`Array.from(document.querySelectorAll('button')).find(b => b.textContent.trim() === 'Fill Form')?.click()`);
+    await sleep(200);
+    await client.eval(`
+      (() => {
+        const setVal = (el, val) => {
+          const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+          setter.call(el, val);
+          el.dispatchEvent(new Event('input', { bubbles: true }));
+          el.dispatchEvent(new Event('blur', { bubbles: true }));
+        };
+        const inputs = Array.from(document.querySelectorAll('.form-widget-box input'));
+        inputs.forEach((inp, idx) => setVal(inp, 'E' + (idx + 1)));
+      })()
+    `);
+    await sleep(300);
+
+    // Save multi-page NSD edits (Page 2, Page 4, Page 12) to multiOutPdf
+    await client.eval(`Array.from(document.querySelectorAll('button')).find(b => b.textContent.trim() === 'Save PDF')?.click()`);
+    for (let i = 0; i < 30; i++) {
+      if (fs.existsSync(multiOutPdf)) break;
+      await sleep(250);
+    }
+    assert(fs.existsSync(multiOutPdf), 'Multi-page NSD output PDF was not saved');
+
+    await jumpAndDetect(16, 121, 121, 'nsd-p16-table.png');
+    const p16NobOk = await client.eval(`document.querySelectorAll('.form-candidate-box').length === 121`);
+    assert(p16NobOk, 'Page 16 expected 121 clean candidate boxes');
+
+    // Reopen saved multiOutPdf in a fresh tab and verify Page 2, Page 4, Page 12 persisted
+    const docNode3 = await client.send('DOM.getDocument', { depth: 1 });
+    const fileInput3 = await client.send('DOM.querySelector', {
+      nodeId: docNode3.root.nodeId,
+      selector: 'input[type="file"][accept=".pdf"]',
+    });
+    await client.send('DOM.setFileInputFiles', { nodeId: fileInput3.nodeId, files: [multiOutPdf] });
+    for (let i = 0; i < 30; i++) {
+      const tab = await client.eval(`
+        (() => {
+          const tabs = Array.from(document.querySelectorAll('.doc-tab'));
+          const t = tabs.find(el => el.textContent.includes('NNSDFILLABLEAPP_multipage_verified'));
+          if (t && !t.classList.contains('active')) t.click();
+          return document.querySelector('.doc-tab.active')?.textContent || '';
+        })()
+      `);
+      if (tab.includes('NNSDFILLABLEAPP_multipage_verified')) break;
+      await sleep(300);
+    }
+    await sleep(600);
+    const jumpPageOnly = async (pNum) => {
+      await client.eval(`
+        (() => {
+          const inp = document.querySelector('.page-navigator-bar input[type="number"]');
+          if (inp) {
+            const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+            setter.call(inp, '${pNum}');
+            inp.dispatchEvent(new Event('input', { bubbles: true }));
+          }
+        })()
+      `);
+      await sleep(80);
+      await client.eval(`
+        (() => {
+          const inp = document.querySelector('.page-navigator-bar input[type="number"]');
+          if (inp) {
+            inp.dispatchEvent(new Event('change', { bubbles: true }));
+            inp.dispatchEvent(new Event('blur', { bubbles: true }));
+            inp.form?.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+          }
+        })()
+      `);
+      for (let i = 0; i < 25; i++) {
+        const st = await client.eval(`document.querySelector('.status-bar')?.textContent || ''`);
+        if (st.includes('Page ' + pNum + ' of 16')) break;
+        await sleep(200);
+      }
+      const stFinal = await client.eval(`document.querySelector('.status-bar')?.textContent || ''`);
+      assert(stFinal.includes('Page ' + pNum + ' of 16'), 'jumpPageOnly failed to sync to Page ' + pNum + ': ' + stFinal);
+      await sleep(400);
+    };
+    await jumpPageOnly(2);
+    await client.eval(`Array.from(document.querySelectorAll('button')).find(b => b.textContent.trim() === 'Fill Form')?.click()`);
+    for (let i = 0; i < 20; i++) {
+      if ((await client.eval(`document.querySelectorAll('.form-widget-box input[type="radio"]').length`)) >= 8) break;
+      await sleep(200);
+    }
+    const p2Reopen = await client.eval(`({
+      tab: document.querySelector('.doc-tab.active')?.textContent || '',
+      radioCount: document.querySelectorAll('.form-widget-box input[type="radio"]').length,
+      cbCount: document.querySelectorAll('.form-widget-box input[type="checkbox"]').length,
+      r0: document.querySelectorAll('.form-widget-box input[type="radio"]')[0]?.checked || false,
+      r1: document.querySelectorAll('.form-widget-box input[type="radio"]')[1]?.checked || false,
+      c0: document.querySelectorAll('.form-widget-box input[type="checkbox"]')[0]?.checked || false,
+      c1: document.querySelectorAll('.form-widget-box input[type="checkbox"]')[1]?.checked || false,
+    })`);
+    console.log('Reopened Page 2 state:', p2Reopen);
+    assert(!p2Reopen.r0 && p2Reopen.r1 && p2Reopen.c0 && p2Reopen.c1, 'Reopened Page 2 radio/checkbox values did not persist');
+
+    await jumpPageOnly(4);
+    const p4Reopen = await client.eval(`Array.from(document.querySelectorAll('.form-widget-box input')).map(i => i.value)`);
+    console.log('Reopened Page 4 values:', p4Reopen);
+    assert(p4Reopen.length === 4 && p4Reopen[0] === '17' && p4Reopen[3] === 'Example Roadside Recovery LLC', 'Reopened Page 4 values did not persist');
+
+    await jumpPageOnly(12);
+    const p12Reopen = await client.eval(`Array.from(document.querySelectorAll('.form-widget-box input')).map(i => i.value)`);
+    console.log('Reopened Page 12 initials:', p12Reopen);
+    assert(p12Reopen.length === 5 && p12Reopen.every((v, idx) => v === 'E' + (idx + 1)), 'Reopened Page 12 initials did not persist');
 
     // 7. Test Document Closing clears thumbnails, canvas, and overlays without stale ghost state
     for (let k = 0; k < 6; k++) {

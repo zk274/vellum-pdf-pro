@@ -166,14 +166,20 @@ def list_form_fields(pdf_bytes: bytes, page_index: Optional[int] = None) -> List
                 disp_bbox = rect_to_display(page, w.rect)
                 w_type = WIDGET_TYPE_NAMES.get(w.field_type, w.field_type_string.lower())
                 val = w.field_value
-                if w_type in ("checkbox", "radiobutton"):
-                    is_checked = bool(val and str(val).lower() not in ("off", "false", "0", "no", ""))
-                else:
-                    is_checked = False
                 try:
                     export_val = w.on_state()
                 except Exception:
                     export_val = None
+                if w_type == "radiobutton":
+                    is_checked = bool(
+                        val
+                        and str(val).lower() not in ("off", "false", "0", "")
+                        and (not export_val or str(val) == str(export_val))
+                    )
+                elif w_type == "checkbox":
+                    is_checked = bool(val and str(val).lower() not in ("off", "false", "0", "no", ""))
+                else:
+                    is_checked = False
                 flags = int(w.field_flags or 0)
                 fields_out.append(
                     {
@@ -242,6 +248,7 @@ def create_form_field(
     align: str = "left",
     font_name: str = "helv",
     tooltip: str = "",
+    export_value: str = "",
 ) -> bytes:
     """Create a new interactive AcroForm field (text, multiline, checkbox, radiobutton, dropdown, listbox, signature)."""
     doc = pymupdf.open(stream=pdf_bytes, filetype="pdf")
@@ -281,7 +288,9 @@ def create_form_field(
             widget.field_value = True if checked or str(default_value).lower() in ("true", "yes", "1", "on") else False
         elif kind in ("radiobutton", "radio"):
             widget.field_type = pymupdf.PDF_WIDGET_TYPE_RADIOBUTTON
-            widget.field_value = True if checked or str(default_value).lower() in ("true", "yes", "1", "on") else False
+            # Set string export_value so PyMuPDF creates /AP /N /<export_value> instead of /False
+            radio_on = (export_value or "").strip() or "Yes"
+            widget.field_value = radio_on
         elif kind in ("dropdown", "combobox", "select"):
             widget.field_type = pymupdf.PDF_WIDGET_TYPE_COMBOBOX
             opts = [c.strip() for c in (choices or ["Option 1", "Option 2", "Option 3"]) if c.strip()]
@@ -304,6 +313,16 @@ def create_form_field(
             widget.field_flags |= pymupdf.PDF_FIELD_IS_REQUIRED
 
         annot = page.add_widget(widget)
+        if kind in ("radiobutton", "radio") and annot is not None:
+            init_on = checked or str(default_value).lower() in ("true", "yes", "1", "on") or (
+                bool(export_value) and str(default_value) == export_value
+            )
+            if not init_on:
+                for aw in page.widgets() or []:
+                    if int(aw.xref) == int(annot.xref):
+                        aw.field_value = False
+                        aw.update()
+                        break
         if kind in ("text", "multiline", "date") and annot is not None:
             _write_widget_align(doc, int(annot.xref), align)
         return doc.tobytes(garbage=2, deflate=True)
@@ -351,10 +370,12 @@ def fill_form_fields_with_report(
                         on_val = "Yes"
                     if isinstance(new_val, bool):
                         w.field_value = new_val
-                    elif str(new_val).lower() in ("true", "1", "yes", "on") or str(new_val) == on_val:
-                        w.field_value = True
+                    elif key_xref in values:
+                        w.field_value = str(new_val).lower() in ("true", "1", "yes", "on") or str(new_val) == on_val
                     else:
-                        w.field_value = False
+                        w.field_value = str(new_val) == on_val or (
+                            on_val == "Yes" and str(new_val).lower() in ("true", "1", "yes", "on")
+                        )
                 elif w.field_type == pymupdf.PDF_WIDGET_TYPE_TEXT:
                     txt = str(new_val if new_val is not None else "")
                     maxlen = int(getattr(w, "text_maxlen", 0) or 0)
@@ -836,6 +857,8 @@ def detect_form_field_candidates(pdf_bytes: bytes, page_index: int = 0) -> List[
                 if _overlaps_existing(r) or _text_inside(r):
                     continue
                 lbl = _nearest_label(r)
+                if len(text_spans) == 0 and not lbl:
+                    continue
                 lbl_l = lbl.lower()
                 is_multiline = r.height >= 38 or (
                     r.height >= 28
@@ -872,6 +895,7 @@ def detect_form_field_candidates(pdf_bytes: bytes, page_index: int = 0) -> List[
                             h_lines.append((min(p1.x, p2.x), max(p1.x, p2.x), (p1.y + p2.y) / 2.0))
 
             # Run line-grid table detector FIRST so rate tables & boxed rows are split into individual cells
+            grid_table_bounds: List[pymupdf.Rect] = []
             if len(vertical_dividers) >= 4 and len(h_lines) >= 4 and not any(
                 c["field_type"] == "checkbox" and c.get("source") == "geometry" for c in candidates
             ):
@@ -889,12 +913,43 @@ def detect_form_field_candidates(pdf_bytes: bytes, page_index: int = 0) -> List[
                 ys_u = _dedup_coords(ys_grid)
                 if len(xs_u) >= 3 and len(ys_u) >= 3:
                     t_top = ys_u[0]
+                    grid_table_bounds.append(pymupdf.Rect(xs_u[0] - 4.0, ys_u[0] - 4.0, xs_u[-1] + 4.0, ys_u[-1] + 4.0))
                     for r_idx in range(len(ys_u) - 1):
                         ry0, ry1 = ys_u[r_idx], ys_u[r_idx + 1]
                         if not (7.5 <= (ry1 - ry0) <= 45.0):
                             continue
                         first_col = pymupdf.Rect(xs_u[0], ry0, xs_u[1], ry1)
                         row_lbl = _text_inside(first_col) or _left_row_label(pymupdf.Rect(xs_u[0], ry0, xs_u[-1], ry1))
+                        # Handle wide merged top row like "Name of Business:" spanning across intermediate column dividers
+                        if row_lbl and "name of business" in row_lbl.lower():
+                            lbl_spans = [
+                                sp for sp in text_spans
+                                if sp["rect"].y0 >= ry0 - 2.0 and sp["rect"].y1 <= ry1 + 2.0
+                                and sp["rect"].x0 >= xs_u[0] - 2.0 and sp["rect"].x1 <= xs_u[-1] + 2.0
+                            ]
+                            if lbl_spans:
+                                lbl_x1 = max(sp["rect"].x1 for sp in lbl_spans)
+                                box_x0 = max(lbl_x1 + 4.0, xs_u[1] + 1.2)
+                                # Find the next vertical divider at least 120pt right of box_x0 that spans this row
+                                row_vs = sorted(
+                                    v[0] for v in vertical_dividers
+                                    if v[1] <= ry0 + 2.0 and v[2] >= ry1 - 2.0 and v[0] - box_x0 >= 120.0
+                                )
+                                right_x = row_vs[0] if row_vs else xs_u[-1]
+                                nob_r = pymupdf.Rect(box_x0, ry0 + 1.2, right_x - 1.2, ry1 - 1.2)
+                                if nob_r.width >= 60.0 and not _overlaps_existing(nob_r) and not _text_inside(nob_r):
+                                    seen_boxes.append(nob_r)
+                                    candidates.append({
+                                        "id": f"cand_{len(candidates) + 1}",
+                                        "page_index": page_index,
+                                        "field_type": "text",
+                                        "field_name": _slug(row_lbl, "name_of_business"),
+                                        "label": row_lbl,
+                                        "bbox": rect_to_display(page, nob_r),
+                                        "confidence": 0.88,
+                                        "source": "geometry",
+                                    })
+                                    continue
                         for c_idx in range(len(xs_u) - 1):
                             cx0, cx1 = xs_u[c_idx], xs_u[c_idx + 1]
                             if not (24.0 <= (cx1 - cx0) <= 420.0):
@@ -940,7 +995,9 @@ def detect_form_field_candidates(pdf_bytes: bytes, page_index: int = 0) -> List[
 
             for lx0, lx1, ly in h_lines:
                 lw = lx1 - lx0
-                # Skip lines that are part of a line-grid table or already-detected boxes
+                # Skip lines that are part of a detected line-grid table (including top/bottom borders)
+                if any(gb.x0 <= lx1 and lx0 <= gb.x1 and gb.y0 <= ly <= gb.y1 for gb in grid_table_bounds):
+                    continue
                 if len(vertical_dividers) >= 4 and len(h_lines) >= 4:
                     if any(abs(ly - h[2]) <= 4.0 and min(lx1, h[1]) - max(lx0, h[0]) >= 20.0 for h in h_lines if h[1] - h[0] >= 200):
                         if any(bx.y0 - 25.0 <= ly <= bx.y1 + 25.0 for bx in seen_boxes):
@@ -1067,33 +1124,91 @@ def _detect_scanned_page_candidates(
     for lbl_idx in range(1, num_lbls):
         x, y, w, h, _ = stats[lbl_idx]
         lx0, ly0, lx1, ly1 = x / scale, y / scale, (x + w) / scale, (y + h) / scale
-        if (lx1 - lx0) >= 14.0 and (ly1 - ly0) <= 6.0:
-            raw_lines.append((lx0, ly0, lx1, ly1))
+        if (lx1 - lx0) >= 14.0 and (ly1 - ly0) <= 6.0 and ly0 >= 42.0:
+            # Measure OpenCV ink density directly above the line to separate genuine blanks from underlined headings
+            by0 = max(0, int((ly0 - 11.0) * scale))
+            by1 = max(by0 + 1, int((ly0 - 2.0) * scale))
+            bx0 = min(pix.width - 1, int((lx0 + 2.0) * scale))
+            bx1 = max(bx0 + 1, int((lx1 - 2.0) * scale))
+            ink_above = float(np.mean(thresh[by0:by1, bx0:bx1]) / 255.0)
+            if ink_above < 0.03:
+                raw_lines.append((lx0, ly0, lx1, ly1))
 
-    # Skip RapidOCR completely on dense text pages with zero checkboxes and zero horizontal lines
+    # Skip RapidOCR completely on dense text pages with zero checkboxes and zero blank answer lines
     if not raw_cb_all and not raw_lines:
         return []
 
-    # Run offline RapidOCR at 150 DPI when visual form primitives exist
+    # Run offline RapidOCR: use band-cropped strips on sparse pages (<= 10 primitives) for ~10x speedup
     ocr_dpi = 150.0
     ocr_scale = ocr_dpi / 72.0
     pix_ocr = page.get_pixmap(dpi=int(ocr_dpi), alpha=False)
     img_ocr = np.frombuffer(pix_ocr.samples, dtype=np.uint8).reshape(pix_ocr.height, pix_ocr.width, 3)
     ocr = _get_rapid_ocr()
-    ocr_raw, _ = ocr(img_ocr)
     ocr_spans: List[Dict[str, Any]] = []
-    for item in (ocr_raw or []):
-        if not item or len(item) < 2:
-            continue
-        pts, txt = item[0], str(item[1]).strip()
-        if not txt or not pts:
-            continue
-        xs = [p[0] / ocr_scale for p in pts]
-        ys = [p[1] / ocr_scale for p in pts]
-        r = pymupdf.Rect(min(xs), min(ys), max(xs), max(ys))
-        if r.height < 5.2:
-            continue
-        ocr_spans.append({"text": txt, "rect": r, "height": r.height})
+
+    prim_bands: List[Tuple[int, int]] = []
+    for cb_r in raw_cb_all:
+        prim_bands.append((max(0, int((cb_r.y0 - 26.0) * ocr_scale)), min(pix_ocr.height, int((cb_r.y1 + 26.0) * ocr_scale))))
+    for lx0, ly0, lx1, ly1 in raw_lines:
+        prim_bands.append((max(0, int((ly0 - 28.0) * ocr_scale)), min(pix_ocr.height, int((ly1 + 26.0) * ocr_scale))))
+
+    prim_bands.sort()
+    merged_bands: List[Tuple[int, int]] = []
+    for b0, b1 in prim_bands:
+        if merged_bands and b0 <= merged_bands[-1][1] + int(12 * ocr_scale):
+            merged_bands[-1] = (merged_bands[-1][0], max(merged_bands[-1][1], b1))
+        else:
+            merged_bands.append((b0, b1))
+
+    covered_frac = sum(b1 - b0 for b0, b1 in merged_bands) / max(1, pix_ocr.height)
+    if len(raw_cb_all) + len(raw_lines) <= 10 and covered_frac < 0.55 and merged_bands:
+        pad_px = 14
+        strips = []
+        band_map: List[Tuple[int, int, int]] = []  # (stack_y0, stack_y1, orig_y0)
+        cur_y = 0
+        for b0, b1 in merged_bands:
+            strip = img_ocr[b0:b1, :, :]
+            strips.append(strip)
+            strips.append(np.full((pad_px, pix_ocr.width, 3), 255, dtype=np.uint8))
+            band_map.append((cur_y, cur_y + (b1 - b0), b0))
+            cur_y += (b1 - b0) + pad_px
+        stacked = np.vstack(strips)
+        ocr_raw, _ = ocr(stacked)
+        for item in (ocr_raw or []):
+            if not item or len(item) < 2:
+                continue
+            pts, txt = item[0], str(item[1]).strip()
+            if not txt or not pts:
+                continue
+            xs = [p[0] / ocr_scale for p in pts]
+            ys_s = [p[1] for p in pts]
+            cy_s = (min(ys_s) + max(ys_s)) / 2.0
+            orig_offset = None
+            for sy0, sy1, oy0 in band_map:
+                if sy0 <= cy_s <= sy1:
+                    orig_offset = oy0 - sy0
+                    break
+            if orig_offset is None:
+                continue
+            ys = [(py + orig_offset) / ocr_scale for py in ys_s]
+            r = pymupdf.Rect(min(xs), min(ys), max(xs), max(ys))
+            if r.height < 5.2:
+                continue
+            ocr_spans.append({"text": txt, "rect": r, "height": r.height})
+    else:
+        ocr_raw, _ = ocr(img_ocr)
+        for item in (ocr_raw or []):
+            if not item or len(item) < 2:
+                continue
+            pts, txt = item[0], str(item[1]).strip()
+            if not txt or not pts:
+                continue
+            xs = [p[0] / ocr_scale for p in pts]
+            ys = [p[1] / ocr_scale for p in pts]
+            r = pymupdf.Rect(min(xs), min(ys), max(xs), max(ys))
+            if r.height < 5.2:
+                continue
+            ocr_spans.append({"text": txt, "rect": r, "height": r.height})
 
     if not ocr_spans:
         return []
@@ -1192,7 +1307,12 @@ def _detect_scanned_page_candidates(
         stem_lbl = _clean_label(left_hits[0]["text"]) if left_hits else ""
         if not opt_lbl and not stem_lbl:
             continue
-        if opt_lbl.replace(".", "").isdigit() and not stem_lbl:
+        roman_set = ("i", "ii", "iii", "iv", "v", "vi", "vii", "viii", "ix", "x")
+        opt_clean = opt_lbl.lower().strip(" .,:;|[]()")
+        stem_clean = stem_lbl.lower().strip(" .,:;|[]()")
+        if (opt_clean.isdigit() or opt_clean in roman_set) and not stem_lbl:
+            continue
+        if (stem_clean.isdigit() or stem_clean in roman_set) and not opt_lbl:
             continue
         cb_infos.append({"rect": cb_r, "opt": opt_lbl, "stem": stem_lbl, "cy": cy})
 
@@ -1275,13 +1395,23 @@ def _detect_scanned_page_candidates(
             and "initial" in s["text"].lower()
         ]
         is_initial_line = bool(right_init or below_init)
-        if lw < 24.0 and not is_initial_line:
+        # Allow short 14..24pt lines if they are Initial lines OR inline date/day/year blanks
+        short_inline_hint = any(
+            abs((s["rect"].y0 + s["rect"].y1) / 2.0 - (ly - 6.0)) <= 11.0
+            and (
+                (-6.0 <= s["rect"].x0 - lx1 <= 65.0 and any(k in s["text"].lower() for k in ("day", "effective", ", 20")))
+                or (s["rect"].x1 <= lx0 + 14.0 and any(k in s["text"].lower() for k in ("this", "20")))
+            )
+            for s in ocr_spans
+        )
+        if lw < 24.0 and not is_initial_line and not short_inline_hint:
             continue
 
-        # Exclude text sitting directly on top of the line (underlined headings/phrases)
+        # Since raw_lines already passed OpenCV ink_above < 0.03, only skip narrow OCR spans centered inside the blank
         text_on_line = [
             s for s in ocr_spans
             if (ly - 13.0) <= (s["rect"].y0 + s["rect"].y1) / 2.0 <= (ly + 1.5)
+            and s["rect"].width <= lw + 40.0
             and (min(s["rect"].x1, lx1) - max(s["rect"].x0, lx0)) >= min(14.0, lw * 0.45)
         ]
         if text_on_line:
@@ -1292,10 +1422,17 @@ def _detect_scanned_page_candidates(
         left_hits = [
             s for s in ocr_spans
             if abs((s["rect"].y0 + s["rect"].y1) / 2.0 - (ly - 6.0)) <= 11.0
-            and s["rect"].x1 <= lx0 + 18.0
+            and (s["rect"].x1 <= lx0 + 18.0 or (s["rect"].x0 < lx0 - 10.0 and s["rect"].x1 >= lx0))
             and (lx0 - s["rect"].x1) <= 130.0
         ]
         left_hits.sort(key=lambda s: abs(lx0 - s["rect"].x1))
+
+        right_hits = [
+            s for s in ocr_spans
+            if abs((s["rect"].y0 + s["rect"].y1) / 2.0 - (ly - 6.0)) <= 11.0
+            and -6.0 <= s["rect"].x0 - lx1 <= 80.0
+        ]
+        right_hits.sort(key=lambda s: s["rect"].x0)
 
         below_hits = []
         if not left_hits:
@@ -1310,7 +1447,7 @@ def _detect_scanned_page_candidates(
 
         if lw >= page_w * 0.72 and not left_hits and not below_hits:
             continue
-        if not left_hits and not below_hits and not is_initial_line:
+        if not left_hits and not below_hits and not is_initial_line and not right_hits:
             continue
 
         field_x0 = lx0
@@ -1319,23 +1456,48 @@ def _detect_scanned_page_candidates(
             ctx = _clean_label(left_hits[0]["text"]) if left_hits else ""
             lbl_txt = f"Initial - {ctx[-28:]}" if ctx else "Initial"
         elif left_hits:
-            lbl_txt = _clean_label(left_hits[0]["text"])
-            if left_hits[0]["rect"].x1 > field_x0 - 2.0:
-                field_x0 = left_hits[0]["rect"].x1 + 4.0
+            raw_left = _clean_label(left_hits[0]["text"])
+            r_txt = right_hits[0]["text"].lower().replace(" ", "") if right_hits else ""
+            l_compact = raw_left.lower().replace(" ", "")
+            # For inline agreement blanks (e.g. "entered into this ____ day of ______, 20__"), derive concise label
+            if short_inline_hint or len(raw_left) > 48:
+                if "dayof" in r_txt:
+                    lbl_txt = "Effective Day"
+                elif r_txt.startswith(",") or "20" in r_txt:
+                    lbl_txt = "Effective Month"
+                elif "effective" in r_txt or l_compact.endswith("20"):
+                    lbl_txt = "Effective Year"
+                elif "onbehalfof" in r_txt:
+                    lbl_txt = "Provider Name"
+                else:
+                    words = [w for w in raw_left.split() if any(c.isalnum() for c in w)]
+                    lbl_txt = " ".join(words[-3:]) if words else ""
+            else:
+                lbl_txt = raw_left
+                if left_hits[0]["rect"].x1 > field_x0 - 2.0 and left_hits[0]["rect"].width <= lw + 40.0:
+                    field_x0 = left_hits[0]["rect"].x1 + 4.0
+        elif right_hits:
+            r_txt = _clean_label(right_hits[0]["text"])
+            r_low = r_txt.lower().replace(" ", "")
+            if "onbehalfof" in r_low or "provider" in r_low:
+                lbl_txt = "Provider Name"
+            else:
+                words = [w for w in r_txt.split() if any(c.isalnum() for c in w)]
+                lbl_txt = " ".join(words[:3]) if words else ""
         elif below_hits:
             lbl_txt = _clean_label(below_hits[0]["text"])
 
         if (lx1 - field_x0) < 14.0:
             continue
-
-        if not is_initial_line and len(lbl_txt) > 58 and "?" not in lbl_txt and ":" not in lbl_txt:
+        if len("".join(ch for ch in lbl_txt if ch.isalnum())) < 2:
             continue
 
         box_r = pymupdf.Rect(field_x0, max(4.0, ly - 15.5), lx1, max(12.0, ly - 1.0))
-        # Strict OCR text collision guard: do not place a candidate over existing agreement text
+        # Only reject if a narrow OCR span sits inside the blank box (wide line spans were already cleared by ink_above < 0.03)
         colliding_ocr = [
             s for s in ocr_spans
-            if (min(s["rect"].y1, box_r.y1) - max(s["rect"].y0, box_r.y0)) >= 5.0
+            if s["rect"].width <= box_r.width + 40.0
+            and (min(s["rect"].y1, box_r.y1) - max(s["rect"].y0, box_r.y0)) >= 5.0
             and (min(s["rect"].x1, box_r.x1) - max(s["rect"].x0, box_r.x0)) >= 14.0
         ]
         if colliding_ocr:

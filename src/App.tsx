@@ -926,6 +926,7 @@ export default function App() {
           bbox: c.bbox,
           multiline: c.field_type === 'multiline',
           tooltip: c.label,
+          export_value: c.export_value || '',
           fill_color_hex: 'transparent',
           border_color_hex: 'transparent',
         });
@@ -3682,7 +3683,7 @@ export default function App() {
                     <span>Pages ({thumbnails.length}) — Drag to Reorder</span>
                   </div>
                   <div className="panel-scroll">
-                    {thumbnails.map((t, idx) => (
+                    {activeDoc && thumbnails.map((t, idx) => (
                       <div
                         key={t.page_index}
                         className={`thumb-card ${t.page_index === currentPage ? 'active' : ''}`}
