@@ -1248,10 +1248,11 @@ def _detect_scanned_page_candidates(
         return txt.strip().rstrip(":").strip()
 
     def _norm_yes_no(opt: str) -> str:
+        import re
         ol = opt.lower().strip(" .,:;|[]()")
-        if ol in ("yes", "ycs", "ves", "iyes", "ye5"):
+        if re.fullmatch(r"[ijl|1\[]?y[e3c]s[ijl|1\]]?", ol) or ol in ("yes", "ycs", "ves", "iyes", "ye5") or ol.startswith("yes "):
             return "Yes"
-        if ol in ("no", "jno", "ino", "n0", "mo", "lno"):
+        if re.fullmatch(r"[ijl|1\[]?n[o0][ijl|1\]]?", ol) or ol in ("no", "jno", "ino", "n0", "mo", "lno") or ol.startswith("no "):
             return "No"
         return opt
 
@@ -1286,7 +1287,15 @@ def _detect_scanned_page_candidates(
         cy = (cb_r.y0 + cb_r.y1) / 2.0
         right_hits = [
             s for s in ocr_spans
-            if abs((s["rect"].y0 + s["rect"].y1) / 2.0 - cy) <= 11.0 and -3.0 <= s["rect"].x0 - cb_r.x1 <= 30.0
+            if abs((s["rect"].y0 + s["rect"].y1) / 2.0 - cy) <= 11.0
+            and -10.0 <= s["rect"].x0 - cb_r.x1 <= 38.0
+            and s["rect"].x1 > cb_r.x1 + 2.0
+            and not any(
+                other is not cb_r
+                and abs((other.y0 + other.y1) / 2.0 - cy) <= 10.0
+                and cb_r.x1 - 2.0 <= other.x0 <= s["rect"].x0
+                for other in dedup_cb
+            )
         ]
         right_hits.sort(key=lambda s: s["rect"].x0)
         opt_lbl = _norm_yes_no(_clean_label(right_hits[0]["text"])) if right_hits else ""
@@ -1294,7 +1303,8 @@ def _detect_scanned_page_candidates(
         left_hits = [
             s for s in ocr_spans
             if abs((s["rect"].y0 + s["rect"].y1) / 2.0 - cy) <= 12.0
-            and s["rect"].x1 <= cb_r.x0 + 2.0
+            and s["rect"].x1 <= cb_r.x0 + 12.0
+            and s["rect"].x0 < cb_r.x0 - 8.0
             and (cb_r.x0 - s["rect"].x1) <= 280.0
             and not any(
                 other is not cb_r
@@ -1305,8 +1315,19 @@ def _detect_scanned_page_candidates(
         ]
         left_hits.sort(key=lambda s: cb_r.x0 - s["rect"].x1)
         stem_lbl = _clean_label(left_hits[0]["text"]) if left_hits else ""
+
+        # Fallback: look for row stem label (e.g., "If yes, for:") even if earlier checkboxes sit between it and cb_r
         if not opt_lbl and not stem_lbl:
-            continue
+            unblocked_left = [
+                s for s in ocr_spans
+                if abs((s["rect"].y0 + s["rect"].y1) / 2.0 - cy) <= 12.0
+                and s["rect"].x1 <= cb_r.x0 + 12.0
+                and (cb_r.x0 - s["rect"].x1) <= 280.0
+            ]
+            unblocked_left.sort(key=lambda s: cb_r.x0 - s["rect"].x1)
+            if unblocked_left:
+                stem_lbl = _clean_label(unblocked_left[0]["text"])
+
         roman_set = ("i", "ii", "iii", "iv", "v", "vi", "vii", "viii", "ix", "x")
         opt_clean = opt_lbl.lower().strip(" .,:;|[]()")
         stem_clean = stem_lbl.lower().strip(" .,:;|[]()")
@@ -1314,9 +1335,14 @@ def _detect_scanned_page_candidates(
             continue
         if (stem_clean.isdigit() or stem_clean in roman_set) and not opt_lbl:
             continue
+        # Keep clean 12.5..22pt hollow squares below the header/logo band (y >= 55pt) even if OCR missed tiny adjacent text
+        if not opt_lbl and not stem_lbl and not (cb_r.y0 >= 55.0 and 12.5 <= cb_r.width <= 22.0 and 12.5 <= cb_r.height <= 22.0):
+            continue
         cb_infos.append({"rect": cb_r, "opt": opt_lbl, "stem": stem_lbl, "cy": cy})
 
     used_cb_idx: set = set()
+    # Sort left-to-right per row so partner pairing is deterministic
+    cb_infos.sort(key=lambda info: (round(info["cy"] / 8.0), info["rect"].x0))
     for i, info in enumerate(cb_infos):
         if i in used_cb_idx:
             continue
@@ -1331,30 +1357,79 @@ def _detect_scanned_page_candidates(
                 o_is_yes = o_l.startswith("yes")
                 o_is_no = o_l.startswith("no")
                 if abs(other["cy"] - info["cy"]) <= 12.0 and (o_is_yes or o_is_no) and (o_is_yes != is_yes):
-                    if abs(other["rect"].x0 - info["rect"].x0) <= 120.0:
+                    if 16.0 <= abs(other["rect"].x0 - info["rect"].x0) <= 120.0:
                         partner_idx = j
                         break
+            # If OCR missed/truncated the partner's Yes/No label, pair with adjacent box in expected direction
+            if partner_idx is None:
+                for j, other in enumerate(cb_infos):
+                    if j == i or j in used_cb_idx:
+                        continue
+                    o_low = other["opt"].lower().strip(" .,:;|[]()")
+                    can_pair_partner = (
+                        not other["opt"]
+                        or (is_yes and (o_low in ("n", "in", "no") or len(other["opt"]) > 20))
+                        or ((not is_yes) and o_low in ("y", "ye", "iy", "yes"))
+                    )
+                    if abs(other["cy"] - info["cy"]) <= 8.0 and can_pair_partner:
+                        dx = other["rect"].x0 - info["rect"].x0
+                        if (is_yes and 20.0 <= dx <= 64.0) or ((not is_yes) and -64.0 <= dx <= -20.0):
+                            partner_idx = j
+                            break
             if partner_idx is not None:
                 partner = cb_infos[partner_idx]
                 used_cb_idx.add(i)
                 used_cb_idx.add(partner_idx)
                 left_box, right_box = (info, partner) if info["rect"].x0 < partner["rect"].x0 else (partner, info)
-                q_stem = left_box["stem"] or f"question_{len(cands) + 1}"
+                left_exp = "Yes"
+                right_exp = "No"
+                q_stem = left_box["stem"] or right_box["stem"] or f"question_{len(cands) + 1}"
                 grp_name = _slug(q_stem, f"radio_group_{len(cands) + 1}")
-                for box in (left_box, right_box):
+                for box, exp_v in ((left_box, left_exp), (right_box, right_exp)):
                     seen.append(box["rect"])
                     cands.append({
                         "id": f"cand_{len(cands) + 1}",
                         "page_index": page_index,
                         "field_type": "radiobutton",
                         "field_name": grp_name,
-                        "export_value": box["opt"] or "Yes",
-                        "label": f"{q_stem} ({box['opt']})",
+                        "export_value": exp_v,
+                        "label": f"{q_stem} ({exp_v})",
                         "bbox": rect_to_display(page, box["rect"]),
                         "confidence": 0.90,
                         "source": "ocr",
                     })
                 continue
+
+    # Second pass: pair two adjacent boxes immediately right of a '?' question into a Yes/No radio group
+    for i, info in enumerate(cb_infos):
+        if i in used_cb_idx or info["opt"] or "?" not in info["stem"]:
+            continue
+        for j, other in enumerate(cb_infos):
+            if j == i or j in used_cb_idx:
+                continue
+            o_low = other["opt"].lower().strip(" .,:;|[]()")
+            if o_low not in ("", "n", "in", "no", "n0"):
+                continue
+            dx = other["rect"].x0 - info["rect"].x0
+            if abs(other["cy"] - info["cy"]) <= 8.0 and 20.0 <= dx <= 64.0:
+                used_cb_idx.add(i)
+                used_cb_idx.add(j)
+                q_stem = info["stem"]
+                grp_name = _slug(q_stem, f"radio_group_{len(cands) + 1}")
+                for box, exp_v in ((info, "Yes"), (other, "No")):
+                    seen.append(box["rect"])
+                    cands.append({
+                        "id": f"cand_{len(cands) + 1}",
+                        "page_index": page_index,
+                        "field_type": "radiobutton",
+                        "field_name": grp_name,
+                        "export_value": exp_v,
+                        "label": f"{q_stem} ({exp_v})",
+                        "bbox": rect_to_display(page, box["rect"]),
+                        "confidence": 0.85,
+                        "source": "ocr",
+                    })
+                break
 
     for i, info in enumerate(cb_infos):
         if i in used_cb_idx:

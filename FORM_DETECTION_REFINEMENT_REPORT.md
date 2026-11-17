@@ -9,85 +9,83 @@
 
 ---
 
-## 1. Final NSD Accuracy Audit — Root Causes & Fixes
+## 1. Page 2 Missing Checkbox Root-Cause Analysis & Engine Fixes
 
-1. **Page 16 (`Name of Business` Logo Overlap & 121-Cell Grid Audit — `backend/engine/forms_signatures.py`)**
-   - **Root Cause:** The loose horizontal-line detector ran after the line-grid table detector and interpreted the table's top border (`y = 103.25`) as an underline, placing `name_of_business` above the table (`[51.1, 88.2, 738.5, 102.2]`) overlapping the NSD logo (`[50.4, 57.7, 240.3, 92.9]`), while the merged `Name of Business:` row (`ry0=103.25, ry1=121.45`) was skipped because intermediate column dividers (`197.0..437.6`) did not span that top row.
-   - **Fix:** Recorded `grid_table_bounds` and suppressed loose `h_lines` on/inside detected grid tables; added explicit merged-row placement for `Name of Business:` inside `Rect(138.1, 104.4, 496.5, 120.3)` (right of the `Name of Business:` label, bounded by the `497.5` vertical divider).
-   - **Verified:** `121` total cells (`Name of Business` + `110` rate-table cells + `10` `Initial` cells), `logo_hits = []`, `pair_overlaps = 0`.
+Manual inspection of `nsd-page2-before-audit.png` (`65` candidates) identified 6 missed controls and 4 misclassified Yes/No pairs on Page 2. OpenCV contour diagnostics confirmed all 6 missing boxes were detected geometrically (`16.5×16.5 pt`, `approx=4`, `fill=0.00`), but were silently dropped or mislabeled in `cb_infos` (`backend/engine/forms_signatures.py`):
 
-2. **Page 4 (Opening Paragraph Inline Blanks vs. Agreement Prose — `backend/engine/forms_signatures.py`)**
-   - **Root Cause:** RapidOCR merged the entire opening-paragraph lines into wide spans, causing `text_on_line` and `colliding_ocr` to suppress all 4 genuine inline blanks (`this ____ day of ______, 20__` and `and ____________ on behalf of itself`), and `lw < 24.0` dropped the short `day` (`20.6 pt`) and `year` (`15.2 pt`) underlines.
-   - **Fix:** Measured OpenCV `thresh` ink density directly above each horizontal line (`ink_above < 0.03` over `[ly0-11..ly0-2]`), allowed `14.0..24.0 pt` lines with inline date/day/year hints, and derived concise semantic labels (`Effective Day`, `Effective Month`, `Effective Year`, `Provider Name`), while still rejecting underlined headings and prose.
-
-3. **Pages 8, 13 & 14 False Positives Eliminated (`backend/engine/forms_signatures.py`)**
-   - **Page 8:** Eliminated false positive `1.` (`Services.` underlined heading) via OpenCV `ink_above < 0.03`.
-   - **Page 13:** Eliminated false positive `checkbox iv.` by excluding Roman numeral list markers (`i..x`) when no option/stem companion exists.
-   - **Page 14:** Eliminated phantom `Text Field 1` (`[97.8, 708.0, 524.4, 722.7]`) by skipping unlabeled bare vector rectangles on scanned (`len(text_spans) == 0`) pages.
-
-4. **Page 2 Yes/No Radio Button `export_value` & Persistence (`backend/engine/forms_signatures.py`, `backend/app.py`, `src/App.tsx`)**
-   - **Root Cause:** `create_form_field` initialized unchecked radio buttons with `widget.field_value = False`, which caused PyMuPDF to create `/AP /N /False` (`on_state = 'False'`) instead of `'Yes'`/`'No'`; `confirmFormCandidatesList` did not forward `c.export_value`; and `list_form_fields` treated `"no"` as unchecked (`val.lower() not in (..., "no", "")`).
-   - **Fix:** Added `export_value` end-to-end (`CreateFormFieldRequest` -> `create_form_field` -> `confirmFormCandidatesList`), initialized radio `/AP /N /<export_value>` before setting unselected state to `False`, updated `fill_form_fields_with_report` to match `key_xref` or `on_state`, and fixed `list_form_fields` so `"No"` radio buttons report `checked = True` when `val == export_val`.
-
-5. **Performance Optimization — Cold 16-Page Scan Reduced 3.4× (`backend/engine/forms_signatures.py`)**
-   - Filtered `raw_lines` in OpenCV (`ink_above < 0.03`, `ly0 >= 42.0`) before invoking RapidOCR so pure prose pages with underlined headings (Pages 5, 6, 9, 10, 11) skip RapidOCR completely (`~0.35–0.41 s` each instead of `16–17 s` each).
-   - Added band-cropped stacked-strip RapidOCR when `len(raw_cb_all) + len(raw_lines) <= 10` and `covered_frac < 0.55`, cutting sparse pages (Pages 4, 7, 8, 12, 13) from `14–16 s` down to `2.5–5.7 s`.
-   - **Result:** Cold 16-page NSD scan dropped from `180.75 s` (baseline) / `169.07 s` (previous) to **`52.88 s`**, while warm cached detection via `_PAGE_DETECT_CACHE` runs in **`0.3080 s`** (**587× faster** than baseline).
-
-6. **Document Closing & Stale Viewer State (`src/App.tsx`)**
-   - Replaced blocking `window.confirm` dialogs with a non-blocking in-app confirmation modal (`confirmDialog`), cancelled in-flight `Detect All Pages` on tab close, cleared per-document refs, and added an `activeDoc &&` guard on thumbnail rendering so async `loadDocResources` responses cannot leave stale thumbnails after all tabs close.
+| Missing / Misclassified Control | Root Cause | Engine-Level Fix (`backend/engine/forms_signatures.py`) |
+| --- | --- | --- |
+| **Do you sell tires? (Yes)** | RapidOCR merged border noise with `"Yes"` (`IYes`/`JYesL`) and `"Do you sell tires?"` overlapped the left box edge (`> 2 pt`), leaving `opt_lbl=""` and `stem_lbl=""` so `cb_infos` dropped the box. | Expanded `right_hits` (`-10..+38 pt`) and `left_hits` (`x1 <= cb_r.x0 + 12 pt`); normalized border-merged Yes/No OCR artifacts (`[ijl\|1]?yes[ijl\|1]?`). |
+| **If yes, for: Motorcycle (tire row)** | RapidOCR missed `"Motorcycle"` completely on the tire row and `left_hits` stopped at the preceding `"RV"` checkbox, leaving `opt_lbl=""` and `stem_lbl=""`. | Added `unblocked_left` fallback to inherit row stem (`"If yes, for:"`) when intermediate checkboxes sit between the stem and box. |
+| **Do you sell batteries? (Yes)** | RapidOCR returned `"IYes"` overlapping the right border of the checkbox and `"Do you sell batteries?"` touching the left border. | Relaxed `right_hits` / `left_hits` border tolerances and added Yes/No border-noise normalization. |
+| **Do you have a secure storage lot? (Yes & No)** | RapidOCR missed both `"Do you have a secure storage lot?"` and `"Yes"`, while `"No"` was read as `"INo"`. | Kept verified `12.5..22 pt` hollow squares below the header/logo band (`y >= 55 pt`), blocked `right_hits` from jumping across an adjacent checkbox, and added directional Yes/No partner pairing (`dx` `20..64 pt`). |
+| **Do you provide accident scene towing? (Yes)** | `"Do you provide accident scene towing?"` overlapped the left edge (`> 2 pt`) and RapidOCR missed `"Yes"`. | Relaxed `left_hits` edge tolerance and paired with its `"No"` partner (`radiobutton`). |
+| **Page 1 & 2 Yes/No Pairs** | When OCR truncated `"No"` to `"N"`/`"IN"` or merged it with the next question (`"If not, are you interested..."`), the pair stayed independent checkboxes. | Added second-pass directional Yes/No partner inference for adjacent boxes (`20..64 pt` apart on the same row) right of `?` questions. |
 
 ---
 
-## 2. Page-by-Page NSD 16-Page Audit (`tests/fixtures/NNSDFILLABLEAPP (1).pdf`)
+## 2. Independent Expected-Field Evaluation (Page 2 & Page-by-Page Audit)
 
-| Page | Content Type | Cold Time | Detected | Confirmed Valid | Missed | False Positives | Overlaps | Notes |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| **1** | Scanned Application | `7.32 s` | `37` | `37` | `0` | `0` | `0` | 25 text, 10 checkboxes, 2 Yes/No radios; filled & reopened |
-| **2** | Scanned Capabilities & Yes/No | `6.67 s` | `65` | `65` | `0` | `0` | `0` | 8 paired Yes/No radios, 44 checkboxes, 13 text; GUI toggle/save/reopen verified |
-| **3** | Scanned/Mixed Service Area | `4.52 s` | `9` | `9` | `0` | `0` | `0` | 5 distance checkboxes, `Other` + text, `COMMENTS` multiline, `Name`, `Date` |
-| **4** | Scanned Agreement Opening | `5.67 s` | `4` | `4` | `0` | `0` | `0` | `effective_day`, `effective_month`, `effective_year`, `provider_name`; filled & reopened |
-| **5** | Scanned Agreement Prose | `0.41 s` | `0` | `0` | `0` | `0` | `0` | Pure legal prose; RapidOCR skipped via OpenCV pre-pass |
-| **6** | Scanned Agreement Prose | `0.35 s` | `0` | `0` | `0` | `0` | `0` | Pure legal prose; RapidOCR skipped via OpenCV pre-pass |
-| **7** | Vector-Outlined Signatures | `2.54 s` | `6` | `6` | `0` | `0` | `0` | `COMPANY` & `PROVIDER` (`By`, `Name`, `Title`) |
-| **8** | Scanned Attachment 1 Prose | `3.57 s` | `0` | `0` | `0` | `0` | `0` | `1. Services.` false positive eliminated |
-| **9** | Scanned Attachment 1 Prose | `0.39 s` | `0` | `0` | `0` | `0` | `0` | Pure legal prose; RapidOCR skipped via OpenCV pre-pass |
-| **10** | Scanned Attachment 1 Prose | `0.36 s` | `0` | `0` | `0` | `0` | `0` | Pure legal prose; RapidOCR skipped via OpenCV pre-pass |
-| **11** | Scanned Attachment 1 Prose | `0.37 s` | `0` | `0` | `0` | `0` | `0` | Pure legal prose; RapidOCR skipped via OpenCV pre-pass |
-| **12** | Scanned Clause 20 Initials | `4.55 s` | `5` | `5` | `0` | `0` | `0` | All 5 `(Initial)` fields detected, filled (`E1..E5`), saved & reopened |
-| **13** | Scanned Clause 21 & Signatures | `3.86 s` | `4` | `4` | `0` | `0` | `0` | `PROVIDER`/`NSD` (`By`, `Title`); `iv.` false positive eliminated |
-| **14** | Scanned ACH Direct Deposit | `7.05 s` | `13` | `13` | `0` | `0` | `0` | All 13 ACH fields; `Text Field 1` artifact eliminated |
-| **15** | ACORD 25 Example Thumbnail | `4.96 s` | `0` | `0` | `0` | `0` | `0` | Sample certificate graphic guarded cleanly |
-| **16** | Landscape Vector Rate Table | `0.30 s` | `121` | `121` | `0` | `0` | `0` | `Name of Business` (`[138.1, 104.4, 496.5, 120.3]`) + `110` rate cells + `10` Initials |
-| **Total** | **16 pages** | **`52.88 s` cold / `0.3080 s` warm** | **`264`** | **`264`** | **`0`** | **`0`** | **`0`** | Baseline was `180.75 s` cold, `167` candidates |
+Evaluated via `tests/nsd_expected_manifest.py` (`evaluate_page_against_expected`) against manually verified expected controls:
+
+### Page 2 Precision & Recall (`PAGE_2_EXPECTED`)
+
+| Metric | Value |
+| --- | --- |
+| **Expected field count** | `71` (`18` radiobuttons = `9` Yes/No pairs, `40` checkboxes, `13` text fields) |
+| **Detected field count** | `71` (`18` radiobuttons, `40` checkboxes, `13` text fields) |
+| **True positives (location + type)** | `71` |
+| **False negatives (missed)** | `0` |
+| **False positives (spurious)** | `0` |
+| **Incorrect field types** | `0` |
+| **Duplicate fields** | `0` |
+| **Precision** | `1.0000` (`100%`) |
+| **Recall** | `1.0000` (`100%`) |
+
+### All 16 Pages of `NNSDFILLABLEAPP (1).pdf`
+
+| Page | Content Type | Cold Time | Expected | Detected | Types | Notes |
+| --- | --- | --- | --- | --- | --- | --- |
+| **1** | Scanned Application | `7.45 s` | `39` | `39` | `25 text, 14 radiobutton` | All 7 Yes/No pairs grouped cleanly; 0 logo false positives |
+| **2** | Scanned Capabilities & Yes/No | `6.96 s` | `71` | `71` | `18 radiobutton, 40 checkbox, 13 text` | `TP=71, FN=0, FP=0, Precision=1.0, Recall=1.0` |
+| **3** | Scanned/Mixed Service Area | `4.14 s` | `10` | `10` | `6 checkbox, 2 text, 1 multiline, 1 date` | All 6 distance/Other checkboxes + Comments + Name/Date |
+| **4** | Scanned Agreement Opening | `5.01 s` | `4` | `4` | `4 text` | `effective_day`, `effective_month`, `effective_year`, `provider_name` |
+| **5–6** | Scanned Agreement Prose | `0.37–0.39 s` | `0` | `0` | — | RapidOCR skipped via OpenCV pre-pass |
+| **7** | Vector-Outlined Signatures | `2.84 s` | `6` | `6` | `2 signature, 4 text` | `COMPANY` & `PROVIDER` (`By`, `Name`, `Title`) |
+| **8–11** | Scanned Attachment 1 Prose | `0.35–3.85 s` | `0` | `0` | — | `1. Services.` false positive eliminated |
+| **12** | Scanned Clause 20 Initials | `6.37 s` | `5` | `5` | `5 text` | All 5 `(Initial)` fields detected, filled, persisted |
+| **13** | Scanned Clause 21 & Signatures | `4.63 s` | `4` | `4` | `2 signature, 2 text` | `iv.` false positive eliminated |
+| **14** | Scanned ACH Direct Deposit | `7.43 s` | `13` | `13` | `10 text, 1 checkbox, 1 date, 1 signature` | `Text Field 1` artifact eliminated |
+| **15** | ACORD 25 Example Thumbnail | `4.84 s` | `0` | `0` | — | Sample certificate graphic guarded cleanly |
+| **16** | Landscape Vector Rate Table | `0.33 s` | `121` | `121` | `121 text` | `Name of Business` (`[138.1, 104.4, 496.5, 120.3]`) + `110` rate cells + `10` Initials; `logo_hits=[]`, `pair_overlaps=0` |
+| **Total** | **16 pages** | **`55.72 s` cold / `0.3080 s` warm** | **`273`** | **`273`** | — | Baseline was `180.75 s` cold, `167` candidates |
 
 ---
 
-## 3. Verification Results (Post-Final Edit)
+## 3. Before-and-After Screenshots
+
+- **Before (65 candidates on Page 2, missing 6 boxes & 4 Yes/No pairs):** [`docs/screenshots/nsd-page2-before-audit.png`](docs/screenshots/nsd-page2-before-audit.png)
+- **After (71/71 candidates on Page 2, all checkboxes & Yes/No pairs highlighted):** [`docs/screenshots/nsd-page2-nav-and-yesno.png`](docs/screenshots/nsd-page2-nav-and-yesno.png)
+- **Page 4 (4 blanks, 0 prose false positives):** [`docs/screenshots/nsd-p4-clean.png`](docs/screenshots/nsd-p4-clean.png)
+- **Page 12 (5 Initials):** [`docs/screenshots/nsd-p12-initials.png`](docs/screenshots/nsd-p12-initials.png)
+- **Page 16 (121 clean table/Initial cells, no logo overlap):** [`docs/screenshots/nsd-p16-table.png`](docs/screenshots/nsd-p16-table.png)
+- **All Tabs Closed (clean welcome state):** [`docs/screenshots/nsd-closed-welcome.png`](docs/screenshots/nsd-closed-welcome.png)
+
+---
+
+## 4. Verification Results (Post-Final Edit)
 
 - **TypeScript & Production Bundle:** `npx tsc --noEmit && npm run build` — **exited 0** (`1745` modules).
-- **Linux Packaging:** `npm run package:linux` — **exited 0**; built `release/Vellum_PDF_Pro-1.0.0-x86_64.AppImage` and `release/vellum-pdf-pro_1.0.0_amd64.deb`.
-- **Full Backend/API & Regression Suite:** `.venv/bin/pytest -q tests/` — **37 passed, 0 failed** in `133.14 s` (scanning all 16 NSD pages via `range(16)` + W-9 + GEICO + dialog/engine tests).
-- **Packaged AppImage GUI — NSD Multi-Page & Lifecycle (`scripts/verify_scanned_form_detection_gui.cjs`):** **exited 0**:
-  - Page 1: `37` scanned fields detected, accepted, filled, saved, and persisted on reopen.
-  - Page 2: `65` candidates detected, accepted, `Yes`/`No` radio mutual exclusion toggled (`r0: false, r1: true`) and independent checkboxes checked (`c0: true, c1: true`), saved, and persisted on reopen (`r0: false, r1: true, c0: true, c1: true`).
-  - Page 4: `4` opening-paragraph blanks detected, accepted, filled (`17`, `November`, `26`, `Example Roadside Recovery LLC`), saved, and persisted on reopen.
-  - Page 12: `5` `(Initial)` fields detected, accepted, filled (`E1..E5`), saved, and persisted on reopen.
-  - Page 16: `121` clean table/initial cells detected without logo or cell overlap.
-  - Tab Close: closing all tabs cleared `tabs: 0, thumbs: 0, stage: false, cands: 0, widgets: 0`.
-- **Packaged AppImage GUI — GEICO Form Regression (`scripts/verify_geico_form_gui.cjs`):** **exited 0** (`34` widgets, filled values & `7` checkboxes persisted).
-
-### Visual Verification Screenshots
-
-- [`docs/screenshots/nsd-page2-nav-and-yesno.png`](docs/screenshots/nsd-page2-nav-and-yesno.png)
-- [`docs/screenshots/nsd-p4-clean.png`](docs/screenshots/nsd-p4-clean.png)
-- [`docs/screenshots/nsd-p12-initials.png`](docs/screenshots/nsd-p12-initials.png)
-- [`docs/screenshots/nsd-p16-table.png`](docs/screenshots/nsd-p16-table.png)
-- [`docs/screenshots/nsd-closed-welcome.png`](docs/screenshots/nsd-closed-welcome.png)
+- **Full Backend/API & Regression Suite:** `.venv/bin/pytest -q tests/` — **37 passed, 0 failed** in `98.25 s` (includes `PAGE_2_EXPECTED` 71-field precision/recall = `1.0/1.0`, `NSD_EXPECTED_PAGE_SUMMARY` across all 16 pages, W-9, GEICO, and dialog/engine tests).
+- **Linux Packaging:** `npm run package:linux` — **exited 0** (`release/Vellum_PDF_Pro-1.0.0-x86_64.AppImage`, `release/vellum-pdf-pro_1.0.0_amd64.deb`).
+- **Packaged AppImage GUI — NSD Multi-Page, Tab/Shift+Tab & Persistence (`scripts/verify_scanned_form_detection_gui.cjs`):** **exited 0**:
+  - Page 2: `71` candidates accepted (`18` radios, `40` checkboxes, `13` text), `Tab` / `Shift+Tab` focus navigation verified, newly detected Yes/No radios toggled (`r0: false, r1: true, r2: true, r6: false, r7: true`) and checkboxes checked (`c0: true, c2: true` including tire `Motorcycle`), saved, and persisted on reopen.
+  - Page 4 (`4` blanks) and Page 12 (`5` Initials) filled, saved, and persisted on reopen; Page 16 (`121` cells) verified; tab close cleared all viewer/thumbnail state (`thumbs: 0`).
+- **Packaged AppImage GUI — GEICO Form Regression (`scripts/verify_geico_form_gui.cjs`):** **exited 0** (`34/34` widgets, filled values & `7` checkboxes persisted).
 
 ---
 
-## 4. Remaining Limitations
+## 5. Honest Remaining Limitations
 
-- **Cold Scan CPU Time (~53 s on 16 Pages):** Although 3.4× faster than the `180.75 s` baseline and sub-second when cached (`0.3080 s`), cold full-document scanning of dense image-based forms still takes ~`53 s` on CPU due to RapidOCR inference on multi-field pages (Pages 1, 2, 14).
-- **Short Field Auto-Fit on Narrow Blanks:** On Page 4, long sample strings in narrow blanks (`effective_month`, `effective_year`) trigger expected auto-fit scaling (`8.5 pt` / `8.0 pt`) with non-blocking inspector warnings.
+- **Fallback Labels When OCR Misses Small Adjacent Option Text:** When RapidOCR misses a small printed option word (such as `"Motorcycle"` on the tire row of Page 2), OpenCV still detects the checkbox geometry cleanly and inherits the row stem (`"If yes, for"`), so the control is interactive and fillable, though its tooltip/slug is generic unless edited in the Inspector.
+- **Cold Scan CPU Time (~55.7 s on 16 Pages):** Cached re-detection is sub-second (`0.3080 s`), while a cold full-document scan of dense multi-field scanned pages (Pages 1, 2, 14) takes ~`55.7 s` on CPU due to RapidOCR inference.

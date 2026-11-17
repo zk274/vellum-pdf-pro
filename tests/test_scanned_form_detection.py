@@ -12,6 +12,11 @@ from fastapi.testclient import TestClient
 
 from backend.app import app
 from backend.engine.forms_signatures import detect_form_field_candidates_detailed
+from tests.nsd_expected_manifest import (
+    NSD_EXPECTED_PAGE_SUMMARY,
+    PAGE_2_EXPECTED,
+    evaluate_page_against_expected,
+)
 
 client = TestClient(app)
 
@@ -76,22 +81,38 @@ def test_nsd_16page_manifest_scoring_conversion_fill_save_reopen():
             if c["field_name"] not in used_names:
                 used_names.append(c["field_name"])
 
-    # Page 1: image-based, 0 native chars -> must detect business info & Yes/No candidates
+    # Page 1: image-based, 0 native chars -> 25 text + 14 radiobuttons (7 Yes/No pairs) = 39
     p1_cands = page_reports[0]["candidates"]
     assert page_reports[0]["detection_mode"] == "ocr"
-    assert len(p1_cands) >= 25
+    assert len(p1_cands) == 39, f"Expected 39 fields on p1, got {len(p1_cands)}"
+    assert sum(1 for c in p1_cands if c["field_type"] == "radiobutton") == 14
+    assert sum(1 for c in p1_cands if c["field_type"] == "text") == 25
     p1_names = " ".join(c["field_name"] for c in p1_cands)
     for kw in ("legal_business_name", "business_address", "city", "state", "zip", "owner_name"):
         assert kw in p1_names, f"Missing expected NSD p1 keyword '{kw}'"
 
-    # Page 2: checkboxes + Yes/No radio groups + fleet lines
+    # Page 2: independent 71-field expected manifest evaluation (18 radios + 40 checkboxes + 13 text)
     p2_cands = page_reports[1]["candidates"]
     assert page_reports[1]["detection_mode"] == "ocr"
-    assert len(p2_cands) >= 40
-    assert any(c["field_type"] in ("checkbox", "radiobutton") for c in p2_cands)
+    p2_metrics = evaluate_page_against_expected(p2_cands, PAGE_2_EXPECTED)
+    assert p2_metrics["expected"] == 71
+    assert p2_metrics["detected"] == 71, f"P2 metrics: {p2_metrics}"
+    assert p2_metrics["true_positives"] == 71, f"P2 metrics: {p2_metrics}"
+    assert p2_metrics["false_negatives"] == 0, f"P2 metrics: {p2_metrics}"
+    assert p2_metrics["false_positives"] == 0, f"P2 metrics: {p2_metrics}"
+    assert p2_metrics["incorrect_types"] == 0, f"P2 metrics: {p2_metrics}"
+    assert p2_metrics["duplicates"] == 0, f"P2 metrics: {p2_metrics}"
+    assert p2_metrics["precision"] == 1.0 and p2_metrics["recall"] == 1.0
 
-    # Page 3: service area checkboxes + comments/acknowledgement
-    assert len(page_reports[2]["candidates"]) >= 6
+    # Verify per-page type summary across all 16 pages
+    for p_idx, exp_summary in NSD_EXPECTED_PAGE_SUMMARY.items():
+        cands = page_reports[p_idx]["candidates"]
+        assert len(cands) == exp_summary["total"], f"P{p_idx+1}: expected {exp_summary['total']}, got {len(cands)}"
+        for ftype, exp_n in exp_summary.items():
+            if ftype == "total":
+                continue
+            got_n = sum(1 for c in cands if c["field_type"] == ftype)
+            assert got_n == exp_n, f"P{p_idx+1} {ftype}: expected {exp_n}, got {got_n}"
 
     # Page 4: 4 genuine opening-paragraph blanks (day, month, year, provider name), 0 prose false positives
     p4_cands = page_reports[3]["candidates"]

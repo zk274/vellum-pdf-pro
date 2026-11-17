@@ -339,25 +339,42 @@ async function run() {
       })()
     `);
     await sleep(600);
-    await jumpAndDetect(2, 65, 65, 'nsd-page2-nav-and-yesno.png');
-    // Accept Page 2 candidates and test real GUI Yes/No radio + checkbox interactions
+    await jumpAndDetect(2, 71, 71, 'nsd-page2-nav-and-yesno.png');
+    // Accept Page 2 candidates and test real GUI Yes/No radio + checkbox interactions + Tab/Shift+Tab
     await client.eval(`Array.from(document.querySelectorAll('button')).find(b => b.textContent.trim().startsWith('Accept All ('))?.click()`);
     for (let i = 0; i < 120; i++) {
       const wCnt = await client.eval(`document.querySelectorAll('.form-widget-box').length`);
       const cCnt = await client.eval(`document.querySelectorAll('.form-candidate-box').length`);
-      if (wCnt >= 65 && cCnt === 0) break;
+      if (wCnt >= 71 && cCnt === 0) break;
       await sleep(250);
     }
     await client.eval(`Array.from(document.querySelectorAll('button')).find(b => b.textContent.trim() === 'Fill Form')?.click()`);
     for (let i = 0; i < 20; i++) {
       const rCnt = await client.eval(`document.querySelectorAll('.form-widget-box input[type="radio"]').length`);
-      if (rCnt >= 8) break;
+      if (rCnt >= 18) break;
       await sleep(200);
     }
+    // Test Tab / Shift+Tab navigation between Page 2 form controls
+    await client.eval(`document.querySelector('.form-widget-box input')?.focus()`);
+    const firstFocusedName = await client.eval(`document.activeElement?.name || document.activeElement?.type || ''`);
+    await client.send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Tab', code: 'Tab', windowsVirtualKeyCode: 9, nativeVirtualKeyCode: 9 });
+    await client.send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Tab', code: 'Tab', windowsVirtualKeyCode: 9, nativeVirtualKeyCode: 9 });
+    await sleep(80);
+    const afterTabEl = await client.eval(`document.activeElement !== document.querySelector('.form-widget-box input')`);
+    await client.send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Tab', code: 'Tab', modifiers: 8, windowsVirtualKeyCode: 9, nativeVirtualKeyCode: 9 });
+    await client.send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Tab', code: 'Tab', modifiers: 8, windowsVirtualKeyCode: 9, nativeVirtualKeyCode: 9 });
+    await sleep(80);
+    const afterShiftTabEl = await client.eval(`document.activeElement === document.querySelector('.form-widget-box input')`);
+    assert(afterTabEl && afterShiftTabEl && firstFocusedName !== '', 'Page 2 Tab / Shift+Tab navigation failed');
+
     await client.eval(`
       (() => {
         const radios = Array.from(document.querySelectorAll('.form-widget-box input[type="radio"]'));
-        if (radios.length >= 1) radios[0].click();
+        if (radios.length >= 9) {
+          radios[0].click(); // repair facility Yes
+          radios[2].click(); // sell tires Yes
+          radios[6].click(); // secure storage lot Yes
+        }
       })()
     `);
     await sleep(150);
@@ -365,8 +382,14 @@ async function run() {
       (() => {
         const radios = Array.from(document.querySelectorAll('.form-widget-box input[type="radio"]'));
         const cbs = Array.from(document.querySelectorAll('.form-widget-box input[type="checkbox"]'));
-        if (radios.length >= 2) radios[1].click();
-        if (cbs.length >= 2) { cbs[0].click(); cbs[1].click(); }
+        if (radios.length >= 9) {
+          radios[1].click(); // switch repair facility -> No
+          radios[7].click(); // switch secure storage lot -> No
+        }
+        if (cbs.length >= 3) {
+          cbs[0].click(); // tires Auto
+          cbs[2].click(); // tires Motorcycle
+        }
       })()
     `);
     await sleep(200);
@@ -379,14 +402,17 @@ async function run() {
           cbCount: cbs.length,
           r0Checked: radios[0]?.checked || false,
           r1Checked: radios[1]?.checked || false,
+          r2Checked: radios[2]?.checked || false,
+          r6Checked: radios[6]?.checked || false,
+          r7Checked: radios[7]?.checked || false,
           c0Checked: cbs[0]?.checked || false,
-          c1Checked: cbs[1]?.checked || false,
+          c2Checked: cbs[2]?.checked || false,
         };
       })()
     `);
     console.log('NSD Page 2 interactive state:', p2Interactive);
-    assert(p2Interactive.radioCount >= 8 && !p2Interactive.r0Checked && p2Interactive.r1Checked, 'Page 2 radio mutual exclusion failed');
-    assert(p2Interactive.cbCount >= 40 && p2Interactive.c0Checked && p2Interactive.c1Checked, 'Page 2 independent checkboxes failed');
+    assert(p2Interactive.radioCount === 18 && !p2Interactive.r0Checked && p2Interactive.r1Checked && p2Interactive.r2Checked && !p2Interactive.r6Checked && p2Interactive.r7Checked, 'Page 2 radio mutual exclusion failed');
+    assert(p2Interactive.cbCount === 40 && p2Interactive.c0Checked && p2Interactive.c2Checked, 'Page 2 independent checkboxes failed');
 
     await jumpAndDetect(4, 4, 4, 'nsd-p4-clean.png');
     await client.eval(`Array.from(document.querySelectorAll('button')).find(b => b.textContent.trim().startsWith('Accept All ('))?.click()`);
@@ -513,11 +539,19 @@ async function run() {
       cbCount: document.querySelectorAll('.form-widget-box input[type="checkbox"]').length,
       r0: document.querySelectorAll('.form-widget-box input[type="radio"]')[0]?.checked || false,
       r1: document.querySelectorAll('.form-widget-box input[type="radio"]')[1]?.checked || false,
+      r2: document.querySelectorAll('.form-widget-box input[type="radio"]')[2]?.checked || false,
+      r6: document.querySelectorAll('.form-widget-box input[type="radio"]')[6]?.checked || false,
+      r7: document.querySelectorAll('.form-widget-box input[type="radio"]')[7]?.checked || false,
       c0: document.querySelectorAll('.form-widget-box input[type="checkbox"]')[0]?.checked || false,
-      c1: document.querySelectorAll('.form-widget-box input[type="checkbox"]')[1]?.checked || false,
+      c2: document.querySelectorAll('.form-widget-box input[type="checkbox"]')[2]?.checked || false,
     })`);
     console.log('Reopened Page 2 state:', p2Reopen);
-    assert(!p2Reopen.r0 && p2Reopen.r1 && p2Reopen.c0 && p2Reopen.c1, 'Reopened Page 2 radio/checkbox values did not persist');
+    assert(
+      p2Reopen.radioCount === 18 && p2Reopen.cbCount === 40
+      && !p2Reopen.r0 && p2Reopen.r1 && p2Reopen.r2 && !p2Reopen.r6 && p2Reopen.r7
+      && p2Reopen.c0 && p2Reopen.c2,
+      'Reopened Page 2 radio/checkbox values did not persist'
+    );
 
     await jumpPageOnly(4);
     const p4Reopen = await client.eval(`Array.from(document.querySelectorAll('.form-widget-box input')).map(i => i.value)`);
