@@ -48,3 +48,4 @@
   - `docs/screenshots/geico-save-fix-after-apply.png`
   - `docs/screenshots/geico-save-fix-after-save.png`
   - `docs/screenshots/geico-save-fix-reopened.png`
+
