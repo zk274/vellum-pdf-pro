@@ -8,12 +8,19 @@ The project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html
 ## [Unreleased]
 
 ### Fixed
+- **Form Detection Accuracy, Navigation, Performance & Document Lifecycle**:
+  - Eliminated false positives and missed fields on the 16-page NSD application (`backend/engine/forms_signatures.py`): suppressed prose underline false positive on Page 4 (`0` false positives), eliminated numbered-list digit checkbox false positives and detected all `5/5` `(Initial)` fields on Page 12, normalized OCR Yes/No typos on Page 2 (`65` candidates), and refined vector grid detection for `8.5 pt` rate-table rows on Page 16 (`122` fields).
+  - Added OpenCV-first geometric pre-pass (`150 DPI` RapidOCR / `175 DPI` OpenCV) and 128-entry `(sha256, page_index)` LRU detection cache (`_PAGE_DETECT_CACHE`), reducing cached 16-page NSD detection from `180.75 s` to `0.3330 s`.
+  - Fixed stale viewer/inspector state and in-flight detection leaks when closing tabs in `src/App.tsx`, and replaced blocking `window.confirm` dialogs with a non-blocking in-app confirmation modal (`Discard & Close` / bulk insert confirmation).
 - **Form Data Loss & Safe Save As Workflow**:
   - Synchronized pending form field edits (`formDraftValuesRef` / `formDirtyRef`) so **Save PDF**, **Apply Field Changes**, widget move/resize/duplicate/delete, and mode switches automatically commit pending form values before saving or mutating the PDF — eliminating data loss when **Save Filled Values** was not clicked manually.
   - Fixed `update_form_field()` in `backend/engine/forms_signatures.py` to write `/T`, `/TU`, and `/Ff` to `/Parent` field dictionaries when present while preserving field values and appearance streams.
   - Implemented first-save native **Save As** prompting (`<filename>_filled.pdf` in the original directory, `showOverwriteConfirmation`), **Cancel** preservation, subsequent **Save** (`Ctrl+S`) targeting the chosen output file, header **Save As** (`Ctrl+Shift+S`) button, and immediate `.dirty-dot` feedback on form edits.
 
 ### Added
+- **Persistent Page Navigator & Page-Aware Candidate Review**:
+  - Added `.page-navigator-bar` (`< Previous | Page [input] of N | Next >`) in the canvas viewport synced with thumbnails, status bar, Inspector, and `PageUp`/`PageDown`/`Home`/`End` shortcuts.
+  - Added `This Page` / `All Pages` candidate scope, `Low-Conf (<80%)` filter, per-page `Accept Page` / `Reject Page` controls, and click-to-jump candidate navigation in `src/App.tsx`.
 - **Hybrid Scanned & Image-Based Form Detection (`Prepare Form`)**:
   - Added 3-stage hybrid form detection (`Stage A` existing AcroForm preservation, `Stage B` native vector geometry & grid/underline extraction, `Stage C` offline `175 DPI` RapidOCR + OpenCV morphological underline & hollow-checkbox detection) in `backend/engine/forms_signatures.py`.
   - Added **Detect Current Page**, **Detect All Pages** (with per-page progress & **Cancel Detection**), color-coded field candidates with confidence & `OCR`/`Geometry` source badges, **Accept All** / **Accept Selected** / **Reject Selected** / **Cancel** controls, and `_fillable.pdf` vs `_filled.pdf` smart default save naming.

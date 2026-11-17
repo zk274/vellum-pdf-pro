@@ -132,7 +132,7 @@ async function run() {
   const cleanup = () => {
     try {
       appProc.kill('SIGTERM');
-    } catch (e) {}
+    } catch (e) { }
   };
   process.on('exit', cleanup);
   process.on('SIGINT', cleanup);
@@ -144,7 +144,7 @@ async function run() {
       try {
         target = await getPageTarget(cdpPort);
         if (target) break;
-      } catch (e) {}
+      } catch (e) { }
     }
     assert(target, 'Could not connect to Electron CDP target');
 
@@ -288,7 +288,95 @@ async function run() {
     assert(sha256(nsdPdf) === origNsdHash, 'Original NSD fixture SHA-256 changed!');
 
     await client.screenshot(path.join(shotsDir, 'nsd-reopened.png'));
-    console.log('ALL SCANNED NSD FORM DETECTION & FILLING GUI CHECKS PASSED!');
+
+    // 6. Test Persistent Page Navigator + Page 2 (Yes/No), Page 4 (0 false positives), Page 12 (5 Initials), Page 16 (Rate table)
+    const jumpAndDetect = async (pageNum, expectedMinCands, expectedMaxCands, shotName) => {
+      await client.eval(`
+        (() => {
+          const inp = document.querySelector('.page-navigator-bar input[type="number"]');
+          if (inp) {
+            const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+            setter.call(inp, '${pageNum}');
+            inp.dispatchEvent(new Event('input', { bubbles: true }));
+            inp.dispatchEvent(new Event('change', { bubbles: true }));
+            inp.dispatchEvent(new Event('blur', { bubbles: true }));
+            inp.form?.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+          }
+        })()
+      `);
+      for (let i = 0; i < 20; i++) {
+        const st = await client.eval(`document.querySelector('.status-bar')?.textContent || ''`);
+        if (st.includes('Page ${pageNum} of 16')) break;
+        await sleep(250);
+      }
+      const statusTxt = await client.eval(`document.querySelector('.status-bar')?.textContent || ''`);
+      assert(statusTxt.includes(`Page ${pageNum} of 16`), `Status bar failed to sync to Page ${pageNum}: ${statusTxt}`);
+
+      await client.eval(`Array.from(document.querySelectorAll('button')).find(b => b.textContent.trim() === 'Prepare Form')?.click()`);
+      await sleep(200);
+      await client.eval(`Array.from(document.querySelectorAll('button')).find(b => b.textContent.includes('Detect Current Page'))?.click()`);
+      await sleep(800);
+      for (let i = 0; i < 70; i++) {
+        const cnt = await client.eval(`document.querySelectorAll('.form-candidate-box').length`);
+        const banner = await client.eval(`document.querySelector('.notice-banner')?.textContent || ''`);
+        if (cnt >= expectedMinCands && cnt <= expectedMaxCands) break;
+        if (expectedMaxCands === 0 && (banner.includes('No confident') || banner.includes(`on Page ${pageNum}.`))) break;
+        await sleep(300);
+      }
+      const finalCnt = await client.eval(`document.querySelectorAll('.form-candidate-box').length`);
+      console.log(`NSD Page ${pageNum} navigator+detect: cands=${finalCnt}`);
+      assert(finalCnt >= expectedMinCands && finalCnt <= expectedMaxCands, `Page ${pageNum}: expected ${expectedMinCands}..${expectedMaxCands}, got ${finalCnt}`);
+      await client.screenshot(path.join(shotsDir, shotName));
+    };
+
+    // Switch back to original NSD tab to test p2, p4, p12, p16 cleanly
+    await client.eval(`
+      (() => {
+        const tabs = Array.from(document.querySelectorAll('.doc-tab'));
+        const t = tabs.find(el => el.textContent.includes('NNSDFILLABLEAPP (1)'));
+        if (t) t.click();
+      })()
+    `);
+    await sleep(600);
+    await jumpAndDetect(2, 40, 90, 'nsd-page2-nav-and-yesno.png');
+    await jumpAndDetect(4, 0, 0, 'nsd-p4-clean.png');
+    await jumpAndDetect(12, 5, 5, 'nsd-p12-initials.png');
+    await jumpAndDetect(16, 100, 150, 'nsd-p16-table.png');
+
+    // 7. Test Document Closing clears thumbnails, canvas, and overlays without stale ghost state
+    for (let k = 0; k < 6; k++) {
+      const closed = await client.eval(`
+        (() => {
+          const btn = document.querySelector('.doc-tab .tab-close');
+          if (!btn) return false;
+          btn.click();
+          return true;
+        })()
+      `);
+      if (!closed) break;
+      await sleep(300);
+      await client.eval(`
+        (() => {
+          const discardBtn = Array.from(document.querySelectorAll('.modal-card button')).find(
+            (b) => b.textContent && b.textContent.includes('Discard & Close')
+          );
+          if (discardBtn) discardBtn.click();
+        })()
+      `);
+      await sleep(350);
+    }
+    const postClose = await client.eval(`({
+      tabs: document.querySelectorAll('.doc-tab').length,
+      thumbs: document.querySelectorAll('.thumb-card').length,
+      stage: !!document.querySelector('.pdf-page-stage'),
+      cands: document.querySelectorAll('.form-candidate-box').length,
+      widgets: document.querySelectorAll('.form-widget-box').length,
+    })`);
+    console.log('Post-close state check:', postClose);
+    assert(postClose.tabs === 0 && postClose.thumbs === 0 && !postClose.stage && postClose.cands === 0 && postClose.widgets === 0, 'Stale viewer state remained after closing all documents!');
+    await client.screenshot(path.join(shotsDir, 'nsd-closed-welcome.png'));
+
+    console.log('ALL SCANNED NSD FORM DETECTION, NAVIGATOR & LIFECYCLE GUI CHECKS PASSED!');
     client.close();
   } finally {
     cleanup();

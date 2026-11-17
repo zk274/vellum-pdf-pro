@@ -339,7 +339,19 @@ export default function App() {
   const [formSubMode, setFormSubMode] = useState<'fill' | 'prepare'>('fill');
   const [detectProgress, setDetectProgress] = useState<{ current: number; total: number } | null>(null);
   const detectCancelledRef = useRef<boolean>(false);
+  const detectDocIdRef = useRef<string | null>(null);
+  const formCandidatesByDocRef = useRef<Record<string, FormFieldCandidate[]>>({});
+  const [candidateScope, setCandidateScope] = useState<'page' | 'all'>('page');
+  const [lowConfidenceOnly, setLowConfidenceOnly] = useState<boolean>(false);
+  const [pageJumpInput, setPageJumpInput] = useState<string>('1');
   const [lastDetectStatus, setLastDetectStatus] = useState<string>('');
+  const [confirmDialog, setConfirmDialog] = useState<{
+    title: string;
+    message: string;
+    confirmLabel: string;
+    danger?: boolean;
+    onConfirm: () => void | Promise<void>;
+  } | null>(null);
   const formWidgetRefs = useRef<Record<number, HTMLElement | null>>({});
 
   // Persistent Text Box Defaults (Black, Helvetica 11pt, Left, Transparent BG, No Border)
@@ -813,13 +825,35 @@ export default function App() {
     [activeDoc, formFields.length]
   );
 
+  // Sync page-jump input with currentPage & per-doc form candidates on tab switch
+  useEffect(() => {
+    setPageJumpInput(String(currentPage + 1));
+  }, [currentPage]);
+
+  useEffect(() => {
+    if (activeDocId) {
+      setFormCandidates(formCandidatesByDocRef.current[activeDocId] || []);
+    } else {
+      setFormCandidates([]);
+    }
+  }, [activeDocId]);
+
   const runDetectCurrentPage = useCallback(async () => {
     if (!activeDoc) return;
+    const targetDocId = activeDoc.doc_id;
+    detectDocIdRef.current = targetDocId;
     setFormSubMode('prepare');
     setSubTool('select');
-    const res = await pdfApi.detectFormCandidates(activeDoc.doc_id, currentPage);
+    const res = await pdfApi.detectFormCandidates(targetDocId, currentPage);
+    if (detectDocIdRef.current !== targetDocId) return;
     const cands = (res.candidates || []).map((c) => ({ ...c, accepted: true }));
-    setFormCandidates(cands);
+    const prevOtherPages = (formCandidatesByDocRef.current[targetDocId] || []).filter(
+      (c) => c.page_index !== currentPage
+    );
+    const merged = [...prevOtherPages, ...cands];
+    formCandidatesByDocRef.current[targetDocId] = merged;
+    setFormCandidates(merged);
+    setCandidateScope('page');
     setLastDetectStatus(res.status_message || '');
     setRightOpen(true);
     notify(res.status_message || `Detected ${cands.length} candidate(s) on Page ${currentPage + 1}.`);
@@ -827,6 +861,8 @@ export default function App() {
 
   const runDetectAllPages = useCallback(async () => {
     if (!activeDoc) return;
+    const targetDocId = activeDoc.doc_id;
+    detectDocIdRef.current = targetDocId;
     setFormSubMode('prepare');
     setSubTool('select');
     detectCancelledRef.current = false;
@@ -838,9 +874,10 @@ export default function App() {
     let existingTotal = 0;
 
     for (let p = 0; p < total; p++) {
-      if (detectCancelledRef.current) break;
+      if (detectCancelledRef.current || detectDocIdRef.current !== targetDocId) break;
       setDetectProgress({ current: p + 1, total });
-      const res = await pdfApi.detectFormCandidates(activeDoc.doc_id, p, usedNames);
+      const res = await pdfApi.detectFormCandidates(targetDocId, p, usedNames);
+      if (detectCancelledRef.current || detectDocIdRef.current !== targetDocId) break;
       existingTotal += res.existing_widgets_count || 0;
       geomTotal += res.geometry_candidates_count || 0;
       ocrTotal += res.ocr_candidates_count || 0;
@@ -849,9 +886,14 @@ export default function App() {
         return { ...c, accepted: true };
       });
       allCands.push(...pageCands);
+      formCandidatesByDocRef.current[targetDocId] = [...allCands];
       setFormCandidates([...allCands]);
     }
 
+    if (detectDocIdRef.current !== targetDocId) {
+      setDetectProgress(null);
+      return;
+    }
     setDetectProgress(null);
     const cancelled = detectCancelledRef.current;
     const summaryMsg = cancelled
@@ -863,8 +905,18 @@ export default function App() {
   }, [activeDoc, formFields, notify]);
 
   const confirmFormCandidatesList = useCallback(
-    async (candsToInsert: FormFieldCandidate[], label: string) => {
-      if (!activeDoc) return;
+    async (candsToInsert: FormFieldCandidate[], label: string, skipConfirm = false) => {
+      if (!activeDoc || candsToInsert.length === 0) return;
+      const pagesSet = new Set(candsToInsert.map((c) => c.page_index));
+      if (!skipConfirm && pagesSet.size > 1 && candsToInsert.length > 20) {
+        setConfirmDialog({
+          title: 'Insert Detected Form Fields',
+          message: `Insert ${candsToInsert.length} detected AcroForm fields across ${pagesSet.size} pages?`,
+          confirmLabel: `Insert ${candsToInsert.length} Fields`,
+          onConfirm: () => confirmFormCandidatesList(candsToInsert, label, true),
+        });
+        return;
+      }
       let lastSummary = activeDoc;
       for (const c of candsToInsert) {
         const res = await pdfApi.createFormField(activeDoc.doc_id, {
@@ -879,13 +931,20 @@ export default function App() {
         });
         lastSummary = res.summary;
       }
-      setFormCandidates([]);
-      setFormSubMode('fill');
-      setSubTool('select');
+      const insertedKeys = new Set(candsToInsert.map((c) => `${c.page_index}_${c.id}`));
+      const remaining = (formCandidatesByDocRef.current[activeDoc.doc_id] || formCandidates).filter(
+        (c) => !insertedKeys.has(`${c.page_index}_${c.id}`)
+      );
+      formCandidatesByDocRef.current[activeDoc.doc_id] = remaining;
+      setFormCandidates(remaining);
+      if (remaining.length === 0) {
+        setFormSubMode('fill');
+        setSubTool('select');
+      }
       await refreshDocState(activeDoc.doc_id, currentPage, lastSummary);
       notify(`${label} (${candsToInsert.length} field(s)).`);
     },
-    [activeDoc, currentPage, notify, refreshDocState]
+    [activeDoc, currentPage, formCandidates, notify, refreshDocState]
   );
 
   const handleSave = async (saveAs = false) => {
@@ -951,15 +1010,66 @@ export default function App() {
     notify(`Redid: ${res.redone_action || 'action'}`);
   };
 
-  const handleCloseTab = async (docId: string, e?: React.MouseEvent) => {
-    e?.stopPropagation();
+  const performCloseTab = async (docId: string) => {
+    if (detectDocIdRef.current === docId) {
+      detectCancelledRef.current = true;
+      setDetectProgress(null);
+    }
+    delete formCandidatesByDocRef.current[docId];
+    delete formDirtyRef.current[docId];
+    delete savedTargetDocsRef.current[docId];
+    setFormDirtyByDoc((prev) => {
+      const next = { ...prev };
+      delete next[docId];
+      return next;
+    });
+
     await pdfApi.closeDoc(docId);
     const remaining = openDocs.filter((d) => d.doc_id !== docId);
     setOpenDocs(remaining);
     if (activeDocId === docId) {
-      setActiveDocId(remaining[0]?.doc_id || null);
+      setSelectedSpan(null);
+      setSelectedImage(null);
+      setSelectedAnnot(null);
+      setSelectedField(null);
+      setDraftTextBox(null);
+      const nextDocId = remaining[0]?.doc_id || null;
+      setActiveDocId(nextDocId);
       setCurrentPage(0);
+      if (!nextDocId) {
+        setPageBitmap('');
+        setThumbnails([]);
+        setPageObjects(null);
+        setAnnotations([]);
+        setFormFields([]);
+        setFormDraftValues({});
+        formDraftValuesRef.current = {};
+        setFormCandidates([]);
+        setFormInspection(null);
+        setBookmarks([]);
+        setAttachments([]);
+        setLastDetectStatus('');
+        setFormFillWarnings([]);
+      } else {
+        setFormCandidates(formCandidatesByDocRef.current[nextDocId] || []);
+      }
     }
+  };
+
+  const handleCloseTab = async (docId: string, e?: React.MouseEvent) => {
+    e?.stopPropagation();
+    const closingDoc = openDocs.find((d) => d.doc_id === docId);
+    if (closingDoc && (closingDoc.dirty || formDirtyRef.current[docId])) {
+      setConfirmDialog({
+        title: 'Unsaved Changes',
+        message: `'${closingDoc.filename}' has unsaved changes. Close anyway and discard unsaved edits?`,
+        confirmLabel: 'Discard & Close',
+        danger: true,
+        onConfirm: () => performCloseTab(docId),
+      });
+      return;
+    }
+    await performCloseTab(docId);
   };
 
   // Keyboard shortcuts & Native Electron Menu Actions
@@ -1013,6 +1123,17 @@ export default function App() {
       } else if (ctrl && key === '-') {
         e.preventDefault();
         setZoom((z) => Math.max(0.4, +(z - 0.2).toFixed(2)));
+      } else if (!isInput && activeDoc && (e.key === 'PageDown' || e.key === 'PageUp' || e.key === 'Home' || e.key === 'End')) {
+        e.preventDefault();
+        if (e.key === 'PageDown') {
+          setCurrentPage((p) => Math.min(activeDoc.page_count - 1, p + 1));
+        } else if (e.key === 'PageUp') {
+          setCurrentPage((p) => Math.max(0, p - 1));
+        } else if (e.key === 'Home') {
+          setCurrentPage(0);
+        } else if (e.key === 'End') {
+          setCurrentPage(Math.max(0, activeDoc.page_count - 1));
+        }
       } else if (ctrl && key === '0') {
         e.preventDefault();
         setZoom(1.0);
@@ -3793,7 +3914,73 @@ export default function App() {
         )}
 
         {/* CENTRAL PDF CANVAS WORKSPACE */}
-        <main className="canvas-viewport">
+        <main className="canvas-viewport" style={{ flexDirection: 'column', alignItems: 'center' }}>
+          {activeDoc && (
+            <div
+              className="page-navigator-bar"
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: 10,
+                padding: '6px 14px',
+                marginBottom: 10,
+                borderRadius: 8,
+                background: 'var(--bg-elevated, rgba(15, 23, 42, 0.85))',
+                border: '1px solid var(--border-subtle)',
+                fontSize: 12.5,
+                position: 'sticky',
+                top: 0,
+                zIndex: 20,
+              }}
+            >
+              <button
+                className="tool-btn"
+                disabled={currentPage <= 0}
+                onClick={() => setCurrentPage((p) => Math.max(0, p - 1))}
+                title="Previous Page (PageUp)"
+              >
+                ‹ Previous
+              </button>
+              <form
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  const num = parseInt(pageJumpInput, 10);
+                  if (!Number.isNaN(num)) {
+                    setCurrentPage(Math.max(0, Math.min(activeDoc.page_count - 1, num - 1)));
+                  }
+                }}
+                style={{ display: 'flex', alignItems: 'center', gap: 6 }}
+              >
+                <span>Page</span>
+                <input
+                  aria-label="Current Page Number"
+                  type="number"
+                  min={1}
+                  max={activeDoc.page_count}
+                  value={pageJumpInput}
+                  onChange={(e) => setPageJumpInput(e.target.value)}
+                  onBlur={() => {
+                    const num = parseInt(pageJumpInput, 10);
+                    if (!Number.isNaN(num)) {
+                      setCurrentPage(Math.max(0, Math.min(activeDoc.page_count - 1, num - 1)));
+                    } else {
+                      setPageJumpInput(String(currentPage + 1));
+                    }
+                  }}
+                  style={{ width: 52, textAlign: 'center', padding: '2px 4px', fontSize: 12.5 }}
+                />
+                <span>of {activeDoc.page_count}</span>
+              </form>
+              <button
+                className="tool-btn"
+                disabled={currentPage >= activeDoc.page_count - 1}
+                onClick={() => setCurrentPage((p) => Math.min(activeDoc.page_count - 1, p + 1))}
+                title="Next Page (PageDown)"
+              >
+                Next ›
+              </button>
+            </div>
+          )}
           {activeDoc && pageBitmap ? (
             <div
               className="pdf-page-stage"
@@ -6376,15 +6563,83 @@ export default function App() {
                     </div>
                   )}
 
-                  {formCandidates.length > 0 && (
+                  {formCandidates.length > 0 && (() => {
+                    const pageCands = formCandidates.filter((c) => c.page_index === currentPage);
+                    const baseList = candidateScope === 'page' ? pageCands : formCandidates;
+                    const visibleList = lowConfidenceOnly
+                      ? baseList.filter((c) => (c.confidence || 0.8) < 0.8)
+                      : baseList;
+                    const acceptedCnt = baseList.filter((c) => c.accepted !== false).length;
+                    const rejectedCnt = baseList.length - acceptedCnt;
+                    const lowConfCnt = baseList.filter((c) => (c.confidence || 0.8) < 0.8).length;
+                    const updateCands = (updater: (prev: FormFieldCandidate[]) => FormFieldCandidate[]) => {
+                      setFormCandidates((prev) => {
+                        const next = updater(prev);
+                        if (activeDoc) formCandidatesByDocRef.current[activeDoc.doc_id] = next;
+                        return next;
+                      });
+                    };
+                    return (
                     <div className="inspector-section">
                       <h4>
-                        <Sparkles size={14} /> Suggested Fields ({formCandidates.length})
+                        <Sparkles size={14} /> Suggested Fields ({visibleList.length} / {formCandidates.length} total)
                       </h4>
-                      <p className="hint-text">
-                        Review confidence, rename/retype, or adjust boundaries on canvas before confirming.
-                      </p>
-                      {formCandidates.map((cand) => (
+                      <div style={{ display: 'flex', gap: 4, marginBottom: 6 }}>
+                        <button
+                          className={`tool-btn ${candidateScope === 'page' ? 'primary' : ''}`}
+                          style={{ flex: 1, fontSize: 11 }}
+                          onClick={() => setCandidateScope('page')}
+                        >
+                          This Page ({pageCands.length})
+                        </button>
+                        <button
+                          className={`tool-btn ${candidateScope === 'all' ? 'primary' : ''}`}
+                          style={{ flex: 1, fontSize: 11 }}
+                          onClick={() => setCandidateScope('all')}
+                        >
+                          All Pages ({formCandidates.length})
+                        </button>
+                      </div>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: 11, marginBottom: 6 }}>
+                        <span>Acc: {acceptedCnt} · Rej: {rejectedCnt} · Low: {lowConfCnt}</span>
+                        <label style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                          <input
+                            type="checkbox"
+                            checked={lowConfidenceOnly}
+                            onChange={(e) => setLowConfidenceOnly(e.target.checked)}
+                          />
+                          Low-Conf (&lt;80%)
+                        </label>
+                      </div>
+                      <div style={{ display: 'flex', gap: 4, marginBottom: 6 }}>
+                        <button
+                          className="tool-btn"
+                          style={{ flex: 1, fontSize: 11 }}
+                          onClick={() =>
+                            updateCands((prev) =>
+                              prev.map((c) =>
+                                candidateScope === 'all' || c.page_index === currentPage ? { ...c, accepted: true } : c
+                              )
+                            )
+                          }
+                        >
+                          Accept {candidateScope === 'page' ? 'Page' : 'All'}
+                        </button>
+                        <button
+                          className="tool-btn"
+                          style={{ flex: 1, fontSize: 11 }}
+                          onClick={() =>
+                            updateCands((prev) =>
+                              prev.map((c) =>
+                                candidateScope === 'all' || c.page_index === currentPage ? { ...c, accepted: false } : c
+                              )
+                            )
+                          }
+                        >
+                          Reject {candidateScope === 'page' ? 'Page' : 'All'}
+                        </button>
+                      </div>
+                      {visibleList.map((cand) => (
                         <div
                           key={`${cand.page_index}_${cand.id}`}
                           style={{
@@ -6400,7 +6655,7 @@ export default function App() {
                               type="checkbox"
                               checked={cand.accepted !== false}
                               onChange={(e) =>
-                                setFormCandidates((prev) =>
+                                updateCands((prev) =>
                                   prev.map((c) =>
                                     c.id === cand.id && c.page_index === cand.page_index
                                       ? { ...c, accepted: e.target.checked }
@@ -6413,7 +6668,7 @@ export default function App() {
                               type="text"
                               value={cand.field_name}
                               onChange={(e) =>
-                                setFormCandidates((prev) =>
+                                updateCands((prev) =>
                                   prev.map((c) =>
                                     c.id === cand.id && c.page_index === cand.page_index
                                       ? { ...c, field_name: e.target.value }
@@ -6426,7 +6681,7 @@ export default function App() {
                             <select
                               value={cand.field_type}
                               onChange={(e) =>
-                                setFormCandidates((prev) =>
+                                updateCands((prev) =>
                                   prev.map((c) =>
                                     c.id === cand.id && c.page_index === cand.page_index
                                       ? { ...c, field_type: e.target.value }
@@ -6445,9 +6700,15 @@ export default function App() {
                               <option value="signature">signature</option>
                             </select>
                           </label>
-                          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 10.5, opacity: 0.75, paddingLeft: 20 }}>
+                          <div
+                            style={{ display: 'flex', justifyContent: 'space-between', fontSize: 10.5, opacity: 0.8, paddingLeft: 20, cursor: 'pointer' }}
+                            onClick={() => setCurrentPage(cand.page_index)}
+                            title={`Jump to Page ${cand.page_index + 1}`}
+                          >
                             <span>P{cand.page_index + 1} · {cand.source === 'ocr' ? 'Scanned OCR' : 'Geometry'}</span>
-                            <span>{Math.round((cand.confidence || 0.8) * 100)}% conf</span>
+                            <span style={{ color: (cand.confidence || 0.8) < 0.8 ? '#f59e0b' : undefined }}>
+                              {Math.round((cand.confidence || 0.8) * 100)}% conf
+                            </span>
                           </div>
                         </div>
                       ))}
@@ -6457,25 +6718,32 @@ export default function App() {
                           style={{ flex: 1 }}
                           onClick={() =>
                             confirmFormCandidatesList(
-                              formCandidates.filter((c) => c.accepted !== false),
-                              'Confirmed selected fields'
+                              baseList.filter((c) => c.accepted !== false),
+                              `Confirmed ${candidateScope === 'page' ? `Page ${currentPage + 1}` : 'selected'} fields`
                             )
                           }
                         >
-                          Accept Selected ({formCandidates.filter((c) => c.accepted !== false).length})
+                          Accept Selected ({acceptedCnt})
                         </button>
                         <button
                           className="tool-btn"
-                          onClick={() => confirmFormCandidatesList(formCandidates, 'Accepted all detected fields')}
+                          onClick={() => confirmFormCandidatesList(baseList, `Accepted all ${candidateScope === 'page' ? `Page ${currentPage + 1}` : 'document'} fields`)}
                         >
-                          Accept All
+                          Accept All ({baseList.length})
                         </button>
-                        <button className="tool-btn" onClick={() => setFormCandidates([])}>
+                        <button
+                          className="tool-btn"
+                          onClick={() => {
+                            if (activeDoc) delete formCandidatesByDocRef.current[activeDoc.doc_id];
+                            setFormCandidates([]);
+                          }}
+                        >
                           Cancel
                         </button>
                       </div>
                     </div>
-                  )}
+                    );
+                  })()}
                 </>
               )}
 
@@ -7364,6 +7632,43 @@ export default function App() {
                 </button>
                 <button className="tool-btn primary" onClick={handleUnlockEncryptedDoc}>
                   Unlock PDF
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL: NON-BLOCKING CONFIRMATION DIALOG */}
+      {confirmDialog && (
+        <div className="modal-backdrop" onClick={() => setConfirmDialog(null)}>
+          <div className="modal-card" onClick={(e) => e.stopPropagation()} style={{ width: 440 }}>
+            <div className="modal-header">
+              <span style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <AlertTriangle size={16} color={confirmDialog.danger ? '#ef4444' : 'var(--primary)'} />
+                {confirmDialog.title}
+              </span>
+              <button className="tab-close" onClick={() => setConfirmDialog(null)}>
+                <X size={16} />
+              </button>
+            </div>
+            <div className="modal-body">
+              <p style={{ fontSize: 13, marginBottom: 14, color: 'var(--text-secondary)', lineHeight: 1.5 }}>
+                {confirmDialog.message}
+              </p>
+              <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
+                <button className="tool-btn" onClick={() => setConfirmDialog(null)}>
+                  Cancel
+                </button>
+                <button
+                  className={`tool-btn ${confirmDialog.danger ? 'danger' : 'primary'}`}
+                  onClick={async () => {
+                    const fn = confirmDialog.onConfirm;
+                    setConfirmDialog(null);
+                    await fn();
+                  }}
+                >
+                  {confirmDialog.confirmLabel}
                 </button>
               </div>
             </div>

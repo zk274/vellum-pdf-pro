@@ -61,10 +61,10 @@ def test_nsd_16page_manifest_scoring_conversion_fill_save_reopen():
     assert open_res.status_code == 200
     doc_id = open_res.json()["doc_id"]
 
-    # Scan key representative pages via API (image-based p1, p2, p3; dense contract p5; vector p7; ACH p14; ACORD p15; rate table p16)
+    # Scan key representative pages via API (image-based p1, p2, p3; contract p4, p5; vector p7; initials p12; ACH p14; ACORD p15; rate table p16)
     page_reports: Dict[int, Dict] = {}
     used_names: List[str] = []
-    for p_idx in [0, 1, 2, 4, 6, 13, 14, 15]:
+    for p_idx in [0, 1, 2, 3, 4, 6, 11, 13, 14, 15]:
         res = client.post(
             f"/api/docs/{doc_id}/forms/detect-candidates",
             json={"page_index": p_idx, "used_names": used_names},
@@ -93,11 +93,18 @@ def test_nsd_16page_manifest_scoring_conversion_fill_save_reopen():
     # Page 3: service area checkboxes + comments/acknowledgement
     assert len(page_reports[2]["candidates"]) >= 6
 
-    # Page 5: dense contract prose -> 0 false positives
+    # Page 4 & 5: dense contract prose -> 0 false positives over legal text
+    assert len(page_reports[3]["candidates"]) == 0
     assert len(page_reports[4]["candidates"]) == 0
 
     # Page 7: vector-outlined signature block -> 6 signature/name/title fields
     assert len(page_reports[6]["candidates"]) >= 4
+
+    # Page 12: 5 "(Initial)" fields detected, zero digit false positives
+    p12_cands = page_reports[11]["candidates"]
+    assert len(p12_cands) == 5, f"Expected 5 initial fields on p12, got {len(p12_cands)}"
+    assert all("initial" in c["field_name"] for c in p12_cands)
+    assert all(c["field_type"] == "text" for c in p12_cands)
 
     # Page 14: ACH banking form
     p14_names = " ".join(c["field_name"] for c in page_reports[13]["candidates"])
@@ -107,8 +114,10 @@ def test_nsd_16page_manifest_scoring_conversion_fill_save_reopen():
     # Page 15: miniature ACORD 25 example thumbnail -> 0 false positives
     assert len(page_reports[14]["candidates"]) == 0
 
-    # Page 16: landscape rate table -> geometry candidates
-    assert len(page_reports[15]["candidates"]) >= 10
+    # Page 16: landscape rate table -> individual cells (> 100 rate + initial cells)
+    p16_cands = page_reports[15]["candidates"]
+    assert len(p16_cands) >= 100
+    assert all((c["bbox"][2] - c["bbox"][0]) <= 200 for c in p16_cands if "electric_js" in c["field_name"])
 
     # Convert Page 1 candidates into real AcroForm widgets
     for c in p1_cands:
