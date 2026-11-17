@@ -10,7 +10,7 @@ import zipfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from fastapi import FastAPI, File, Form, HTTPException, Query, Response, UploadFile
+from fastapi import Body, FastAPI, File, Form, HTTPException, Query, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 import pymupdf
@@ -32,6 +32,7 @@ from .engine.forms_signatures import (
     create_form_field,
     delete_form_field,
     detect_form_field_candidates,
+    detect_form_field_candidates_detailed,
     duplicate_form_field,
     fill_form_fields_with_report,
     generate_pkcs12_certificate,
@@ -1285,10 +1286,15 @@ def api_inspect_forms(doc_id: str, page_index: Optional[int] = Query(None)) -> D
 
 
 @app.post("/api/docs/{doc_id}/forms/detect-candidates")
-def api_detect_form_candidates(doc_id: str, page_index: int = Query(0)) -> Dict[str, Any]:
+def api_detect_form_candidates(
+    doc_id: str,
+    page_index: int = Query(0),
+    payload: Optional[Dict[str, Any]] = Body(default=None),
+) -> Dict[str, Any]:
     session = session_manager.get_session(doc_id)
-    candidates = detect_form_field_candidates(session.pdf_bytes, page_index=page_index)
-    return {"page_index": page_index, "candidates": candidates}
+    target_page = int(payload.get("page_index", page_index)) if payload else page_index
+    used = set(payload.get("used_names") or []) if payload else None
+    return detect_form_field_candidates_detailed(session.pdf_bytes, page_index=target_page, used_names=used)
 
 
 @app.post("/api/docs/{doc_id}/forms/create")

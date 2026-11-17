@@ -304,12 +304,24 @@ export interface FormInspectionReport {
 export interface FormFieldCandidate {
   id: string;
   page_index: number;
-  field_type: 'text' | 'multiline' | 'checkbox' | string;
+  field_type: 'text' | 'multiline' | 'checkbox' | 'radiobutton' | 'dropdown' | 'date' | 'signature' | string;
   field_name: string;
   label: string;
   bbox: [number, number, number, number];
   confidence: number;
+  source?: 'geometry' | 'ocr' | 'hybrid' | string;
+  export_value?: string;
   accepted?: boolean;
+}
+
+export interface FormDetectReport {
+  page_index: number;
+  existing_widgets_count: number;
+  geometry_candidates_count: number;
+  ocr_candidates_count: number;
+  detection_mode: 'existing_acroform' | 'geometry' | 'ocr' | 'hybrid' | 'none' | string;
+  status_message: string;
+  candidates: FormFieldCandidate[];
 }
 
 export interface FormFillWarning {

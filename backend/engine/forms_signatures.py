@@ -269,7 +269,7 @@ def create_form_field(
             widget.border_width = 0.0
 
         kind = field_type.lower().strip()
-        if kind in ("text", "multiline"):
+        if kind in ("text", "multiline", "date"):
             widget.field_type = pymupdf.PDF_WIDGET_TYPE_TEXT
             widget.field_value = default_value
             if kind == "multiline" or multiline:
@@ -304,7 +304,7 @@ def create_form_field(
             widget.field_flags |= pymupdf.PDF_FIELD_IS_REQUIRED
 
         annot = page.add_widget(widget)
-        if kind in ("text", "multiline") and annot is not None:
+        if kind in ("text", "multiline", "date") and annot is not None:
             _write_widget_align(doc, int(annot.xref), align)
         return doc.tobytes(garbage=2, deflate=True)
     finally:
@@ -813,6 +813,7 @@ def detect_form_field_candidates(pdf_bytes: bytes, page_index: int = 0) -> List[
                                 "label": full_lbl,
                                 "bbox": rect_to_display(page, cb_r),
                                 "confidence": 0.90,
+                                "source": "geometry",
                             })
                         elif cell_r.width >= 36:
                             full_lbl = f"{row_lbl} - {col_lbl}".strip(" -") if (row_lbl or col_lbl) else ""
@@ -838,6 +839,10 @@ def detect_form_field_candidates(pdf_bytes: bytes, page_index: int = 0) -> List[
                     and any(k in lbl_l for k in ("area", "location", "notes", "comment", "description", "detail", "remark"))
                 )
                 f_type = "multiline" if is_multiline else "text"
+                if any(k in lbl_l for k in ("signature", "signed by", "owner signature", "authorized signature")):
+                    f_type = "signature"
+                elif lbl_l == "date" or lbl_l.endswith(" date") or lbl_l.startswith("date "):
+                    f_type = "date"
                 seen_boxes.append(r)
                 candidates.append({
                     "id": f"cand_{len(candidates) + 1}",
@@ -847,14 +852,536 @@ def detect_form_field_candidates(pdf_bytes: bytes, page_index: int = 0) -> List[
                     "label": lbl or f"Text Field {len(candidates) + 1}",
                     "bbox": rect_to_display(page, r),
                     "confidence": 0.90 if lbl else 0.70,
+                    "source": "geometry",
                 })
+
+        # Stage B2: Native vector horizontal underlines & open grid cells (when native text exists and no AcroForm yet)
+        if len(text_spans) > 0 and len(existing_widgets) < 3:
+            # Detect horizontal vector underlines (not covered by text directly above)
+            h_lines: List[Tuple[float, float, float]] = []
+            for d in drawings:
+                dr = pymupdf.Rect(d["rect"])
+                if dr.width >= 32 and dr.height <= 2.5:
+                    h_lines.append((dr.x0, dr.x1, (dr.y0 + dr.y1) / 2.0))
+                for item in d.get("items", []):
+                    if item and item[0] == "l" and len(item) >= 3:
+                        p1, p2 = item[1], item[2]
+                        if abs(p1.y - p2.y) <= 1.5 and abs(p1.x - p2.x) >= 32:
+                            h_lines.append((min(p1.x, p2.x), max(p1.x, p2.x), (p1.y + p2.y) / 2.0))
+            for lx0, lx1, ly in h_lines:
+                lw = lx1 - lx0
+                # Skip lines that are simply borders of already-detected shaded boxes or table rows
+                if any(
+                    (abs(ly - bx.y0) <= 4.0 or abs(ly - bx.y1) <= 4.0)
+                    and min(lx1, bx.x1) - max(lx0, bx.x0) >= 12.0
+                    for bx in seen_boxes
+                ):
+                    continue
+                # Skip lines inside a shaded/bordered table header band when table cells were already detected
+                if any(bx.y0 - 20.0 <= ly <= bx.y1 + 4.0 and min(lx1, bx.x1) - max(lx0, bx.x0) >= 12.0 for bx in seen_boxes):
+                    continue
+                # Skip underlined words/prose on dense instruction pages
+                if len(text_spans) > 120:
+                    continue
+                # Skip text directly sitting on top of the line (underlined words/headings)
+                above_band = pymupdf.Rect(lx0, max(0.0, ly - 13.0), lx1, ly + 1.0)
+                if _text_inside(above_band):
+                    continue
+                # Look for label to the left or immediately below
+                probe_r = pymupdf.Rect(lx0, max(0.0, ly - 15.0), lx1, ly - 1.0)
+                lbl = _left_row_label(probe_r)
+                if not lbl:
+                    below_hits = [
+                        sp for sp in text_spans
+                        if 0 <= sp["rect"].y0 - ly <= 16 and sp["rect"].x0 >= lx0 - 12 and sp["rect"].x1 <= lx1 + 24
+                    ]
+                    if below_hits:
+                        below_hits.sort(key=lambda s: s["rect"].y0)
+                        if len(below_hits[0]["text"]) <= 36:
+                            lbl = below_hits[0]["text"].rstrip(":")
+                if not lbl:
+                    continue
+                if lw >= page.rect.width * 0.78 and len(lbl) > 40:
+                    continue
+                if _overlaps_existing(probe_r):
+                    continue
+                lbl_l = lbl.lower()
+                f_type = "signature" if ("signature" in lbl_l or lbl_l in ("by", "signed")) else (
+                    "date" if (lbl_l == "date" or lbl_l.endswith(" date")) else "text"
+                )
+                seen_boxes.append(probe_r)
+                candidates.append({
+                    "id": f"cand_{len(candidates) + 1}",
+                    "page_index": page_index,
+                    "field_type": f_type,
+                    "field_name": _slug(lbl, f"field_{len(candidates) + 1}"),
+                    "label": lbl,
+                    "bbox": rect_to_display(page, probe_r),
+                    "confidence": 0.84,
+                    "source": "geometry",
+                })
+
+            # Detect empty line-grid cells (e.g., landscape rate tables formed by horizontal + vertical strokes)
+            if len(vertical_dividers) >= 4 and len(h_lines) >= 4 and not any(
+                c["field_type"] == "checkbox" and c.get("source") == "geometry" for c in candidates
+            ):
+                xs_grid = sorted({round(v[0], 1) for v in vertical_dividers})
+                ys_grid = sorted({round(h[2], 1) for h in h_lines})
+                # Deduplicate close grid coordinates (< 4pt)
+                def _dedup_coords(vals: List[float]) -> List[float]:
+                    out: List[float] = []
+                    for v in vals:
+                        if not out or abs(v - out[-1]) >= 4.0:
+                            out.append(v)
+                    return out
+                xs_u = _dedup_coords(xs_grid)
+                ys_u = _dedup_coords(ys_grid)
+                if len(xs_u) >= 3 and len(ys_u) >= 3:
+                    t_top = ys_u[0]
+                    for r_idx in range(len(ys_u) - 1):
+                        ry0, ry1 = ys_u[r_idx], ys_u[r_idx + 1]
+                        if not (10.0 <= (ry1 - ry0) <= 45.0):
+                            continue
+                        first_col = pymupdf.Rect(xs_u[0], ry0, xs_u[1], ry1)
+                        row_lbl = _text_inside(first_col) or _left_row_label(pymupdf.Rect(xs_u[0], ry0, xs_u[-1], ry1))
+                        for c_idx in range(len(xs_u) - 1):
+                            cx0, cx1 = xs_u[c_idx], xs_u[c_idx + 1]
+                            if not (24.0 <= (cx1 - cx0) <= 180.0):
+                                continue
+                            cell_r = pymupdf.Rect(cx0 + 1.0, ry0 + 1.0, cx1 - 1.0, ry1 - 1.0)
+                            if _overlaps_existing(cell_r) or _text_inside(cell_r) or _is_cell_disabled(cell_r):
+                                continue
+                            col_lbl = _col_header_for_cell(cell_r, t_top)
+                            if not col_lbl:
+                                # Check below cell (e.g., "Intial" boxes)
+                                below_col = [
+                                    sp for sp in text_spans
+                                    if 0 <= sp["rect"].y0 - ry1 <= 18
+                                    and min(sp["rect"].x1, cx1) - max(sp["rect"].x0, cx0) >= 8
+                                ]
+                                if below_col:
+                                    col_lbl = below_col[0]["text"].strip()
+                            if not (row_lbl or col_lbl):
+                                continue
+                            full_lbl = f"{row_lbl} - {col_lbl}".strip(" -")
+                            seen_boxes.append(cell_r)
+                            candidates.append({
+                                "id": f"cand_{len(candidates) + 1}",
+                                "page_index": page_index,
+                                "field_type": "text",
+                                "field_name": _slug(full_lbl, f"cell_{len(candidates) + 1}"),
+                                "label": full_lbl,
+                                "bbox": rect_to_display(page, cell_r),
+                                "confidence": 0.80,
+                                "source": "geometry",
+                            })
+
+        # Stage C: Scanned / image-based / outlined-vector fallback using RapidOCR + OpenCV
+        is_image_or_outlined_page = len(text_spans) == 0 or (
+            len(candidates) == 0 and len(" ".join(s["text"] for s in text_spans)) < 120 and len(page.get_images()) > 0
+        )
+        if is_image_or_outlined_page:
+            ocr_cands = _detect_scanned_page_candidates(
+                page=page,
+                page_index=page_index,
+                existing_rects=existing_rects + seen_boxes,
+                used_names=used_names,
+            )
+            candidates.extend(ocr_cands)
 
         candidates.sort(key=lambda c: (round(c["bbox"][1] / 8.0), c["bbox"][0]))
         for idx, c in enumerate(candidates, start=1):
             c["id"] = f"cand_{idx}"
+            if "source" not in c:
+                c["source"] = "geometry"
         return candidates
     finally:
         doc.close()
+
+
+def _detect_scanned_page_candidates(
+    page: pymupdf.Page,
+    page_index: int,
+    existing_rects: List[pymupdf.Rect],
+    used_names: set,
+) -> List[Dict[str, Any]]:
+    """Stage C: RapidOCR + OpenCV morphological line/checkbox detection for scanned & outlined pages."""
+    import cv2
+    import numpy as np
+    from .ocr_convert import _get_rapid_ocr
+
+    dpi = 175.0
+    scale = dpi / 72.0
+    pix = page.get_pixmap(dpi=int(dpi), alpha=False)
+    img_rgb = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, 3)
+    gray = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2GRAY)
+
+    # Run offline RapidOCR
+    ocr = _get_rapid_ocr()
+    ocr_raw, _ = ocr(img_rgb)
+    ocr_spans: List[Dict[str, Any]] = []
+    for item in (ocr_raw or []):
+        if not item or len(item) < 2:
+            continue
+        pts, txt = item[0], str(item[1]).strip()
+        if not txt or not pts:
+            continue
+        xs = [p[0] / scale for p in pts]
+        ys = [p[1] / scale for p in pts]
+        r = pymupdf.Rect(min(xs), min(ys), max(xs), max(ys))
+        # Ignore tiny thumbnail text (e.g., miniature embedded ACORD sample certificate on Page 15)
+        if r.height < 5.2:
+            continue
+        ocr_spans.append({"text": txt, "rect": r, "height": r.height})
+
+    if not ocr_spans:
+        return []
+
+    # Guard against decorative sample-form thumbnail pages (e.g., "Attach your Certificate of Liability Insurance")
+    native_low = page.get_text("text").lower()
+    ocr_spans.sort(key=lambda s: (s["rect"].y0, s["rect"].x0))
+    all_ocr_low = " ".join(s["text"].lower() for s in ocr_spans[:15])
+    if (
+        "attach your certificate" in native_low
+        or "attach your certificate" in all_ocr_low
+        or "certificate of liability insurance" in all_ocr_low
+        or "acord" in all_ocr_low
+    ):
+        return []
+
+    def _overlaps(r: pymupdf.Rect, rects: List[pymupdf.Rect], ratio: float = 0.35) -> bool:
+        for ex in rects:
+            inter = r & ex
+            if not inter.is_empty and inter.get_area() > ratio * min(max(1.0, r.get_area()), max(1.0, ex.get_area())):
+                return True
+        return False
+
+    def _slug(label: str, fallback: str) -> str:
+        cleaned = "".join(ch.lower() if ch.isalnum() else "_" for ch in label).strip("_")
+        while "__" in cleaned:
+            cleaned = cleaned.replace("__", "_")
+        base = cleaned[:40] if cleaned else fallback
+        cand = base
+        idx = 2
+        while cand in used_names:
+            suf = f"_{idx}"
+            cand = f"{base[:max(1, 40 - len(suf))]}{suf}"
+            idx += 1
+        used_names.add(cand)
+        return cand
+
+    def _clean_label(txt: str) -> str:
+        return txt.strip().rstrip(":").strip()
+
+    def _classify_from_label(lbl: str, default_type: str = "text") -> str:
+        ll = lbl.lower()
+        if any(k in ll for k in ("signature", "owner signature", "authorized signature", "signed by")) or ll == "by":
+            return "signature"
+        if ll == "date" or ll.endswith(" date") or ll.startswith("date "):
+            return "date"
+        if any(k in ll for k in ("comment", "notes", "description", "remarks")):
+            return "multiline"
+        return default_type
+
+    # Binarize image (white features on black background)
+    _, thresh = cv2.threshold(gray, 200, 255, cv2.THRESH_BINARY_INV)
+    page_w = float(page.rect.width)
+    page_h = float(page.rect.height)
+    cands: List[Dict[str, Any]] = []
+    seen: List[pymupdf.Rect] = list(existing_rects)
+
+    # 1. Detect printed square checkboxes
+    contours, _ = cv2.findContours(thresh, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
+    raw_cb: List[pymupdf.Rect] = []
+    for cnt in contours:
+        x, y, w, h = cv2.boundingRect(cnt)
+        pt_w, pt_h = w / scale, h / scale
+        if not (9.0 <= pt_w <= 24.0 and 9.0 <= pt_h <= 24.0):
+            continue
+        aspect = pt_w / max(0.1, pt_h)
+        if not (0.72 <= aspect <= 1.38):
+            continue
+        # Ensure interior is mostly hollow (white) rather than a solid filled icon/glyph
+        roi = thresh[y + 2 : max(y + 3, y + h - 2), x + 2 : max(x + 3, x + w - 2)]
+        if roi.size == 0 or float(np.mean(roi) / 255.0) > 0.45:
+            continue
+        cb_r = pymupdf.Rect(x / scale, y / scale, (x + w) / scale, (y + h) / scale)
+        # Exclude if OCR text sits directly inside the square
+        if any(cb_r.contains(pymupdf.Point((s["rect"].x0 + s["rect"].x1) / 2.0, (s["rect"].y0 + s["rect"].y1) / 2.0)) for s in ocr_spans):
+            continue
+        raw_cb.append(cb_r)
+
+    # Deduplicate concentric inner/outer checkbox borders
+    dedup_cb: List[pymupdf.Rect] = []
+    for cb_r in sorted(raw_cb, key=lambda r: -r.get_area()):
+        if any((cb_r & ex).get_area() > 0.25 * min(cb_r.get_area(), ex.get_area()) for ex in dedup_cb):
+            continue
+        dedup_cb.append(cb_r)
+
+    # Group checkboxes by row to identify Yes/No radio pairs vs multi-select checkboxes
+    cb_infos: List[Dict[str, Any]] = []
+    for cb_r in dedup_cb:
+        if _overlaps(cb_r, seen):
+            continue
+        cy = (cb_r.y0 + cb_r.y1) / 2.0
+        # Label immediately to the right of checkbox
+        right_hits = [
+            s for s in ocr_spans
+            if abs((s["rect"].y0 + s["rect"].y1) / 2.0 - cy) <= 10.0 and -2.0 <= s["rect"].x0 - cb_r.x1 <= 28.0
+        ]
+        right_hits.sort(key=lambda s: s["rect"].x0)
+        opt_lbl = _clean_label(right_hits[0]["text"]) if right_hits else ""
+
+        # Question/stem to the left on same row (ignore if another checkbox sits in between)
+        left_hits = [
+            s for s in ocr_spans
+            if abs((s["rect"].y0 + s["rect"].y1) / 2.0 - cy) <= 12.0
+            and s["rect"].x1 <= cb_r.x0 + 2.0
+            and (cb_r.x0 - s["rect"].x1) <= 280.0
+            and not any(
+                other is not cb_r
+                and abs((other.y0 + other.y1) / 2.0 - cy) <= 10.0
+                and s["rect"].x1 <= other.x0 <= cb_r.x0
+                for other in dedup_cb
+            )
+        ]
+        left_hits.sort(key=lambda s: cb_r.x0 - s["rect"].x1)
+        stem_lbl = _clean_label(left_hits[0]["text"]) if left_hits else ""
+        # Require at least one associated label so decorative squares/logo shapes are excluded
+        if not opt_lbl and not stem_lbl:
+            continue
+        cb_infos.append({"rect": cb_r, "opt": opt_lbl, "stem": stem_lbl, "cy": cy})
+
+    # Detect Yes/No radio pairs
+    used_cb_idx: set = set()
+    for i, info in enumerate(cb_infos):
+        if i in used_cb_idx:
+            continue
+        opt_l = info["opt"].lower().strip()
+        if opt_l in ("yes", "no") or opt_l.startswith("yes ") or opt_l.startswith("no "):
+            is_yes = opt_l.startswith("yes")
+            # Look for partner Yes/No on same row within 120pt
+            partner_idx = None
+            for j, other in enumerate(cb_infos):
+                if j == i or j in used_cb_idx:
+                    continue
+                o_l = other["opt"].lower().strip()
+                o_is_yes = o_l.startswith("yes")
+                o_is_no = o_l.startswith("no")
+                if abs(other["cy"] - info["cy"]) <= 12.0 and (o_is_yes or o_is_no) and (o_is_yes != is_yes):
+                    if abs(other["rect"].x0 - info["rect"].x0) <= 120.0:
+                        partner_idx = j
+                        break
+            if partner_idx is not None:
+                partner = cb_infos[partner_idx]
+                used_cb_idx.add(i)
+                used_cb_idx.add(partner_idx)
+                left_box, right_box = (info, partner) if info["rect"].x0 < partner["rect"].x0 else (partner, info)
+                q_stem = left_box["stem"] or f"question_{len(cands) + 1}"
+                grp_name = _slug(q_stem, f"radio_group_{len(cands) + 1}")
+                for box in (left_box, right_box):
+                    seen.append(box["rect"])
+                    cands.append({
+                        "id": f"cand_{len(cands) + 1}",
+                        "page_index": page_index,
+                        "field_type": "radiobutton",
+                        "field_name": grp_name,
+                        "export_value": box["opt"] or "Yes",
+                        "label": f"{q_stem} ({box['opt']})",
+                        "bbox": rect_to_display(page, box["rect"]),
+                        "confidence": 0.88,
+                        "source": "ocr",
+                    })
+                continue
+
+    for i, info in enumerate(cb_infos):
+        if i in used_cb_idx:
+            continue
+        seen.append(info["rect"])
+        full_lbl = f"{info['stem']} - {info['opt']}".strip(" -") if (info["stem"] or info["opt"]) else f"Checkbox {len(cands) + 1}"
+        # Keep concise readable name when stem is long
+        short_lbl = info["opt"] if (info["opt"] and len(info["stem"]) > 42) else full_lbl
+        cands.append({
+            "id": f"cand_{len(cands) + 1}",
+            "page_index": page_index,
+            "field_type": "checkbox",
+            "field_name": _slug(short_lbl, f"checkbox_{len(cands) + 1}"),
+            "label": full_lbl,
+            "bbox": rect_to_display(page, info["rect"]),
+            "confidence": 0.82 if info["opt"] else 0.65,
+            "source": "ocr",
+        })
+
+    # 2. Detect horizontal answer underlines via morphological opening
+    h_kernel_len = max(24, int(26 * scale))
+    h_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (h_kernel_len, 1))
+    h_morph = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, h_kernel, iterations=1)
+    num_lbls, _, stats, _ = cv2.connectedComponentsWithStats(h_morph)
+
+    for lbl_idx in range(1, num_lbls):
+        x, y, w, h, _ = stats[lbl_idx]
+        lx0, ly0, lx1, ly1 = x / scale, y / scale, (x + w) / scale, (y + h) / scale
+        lw = lx1 - lx0
+        lh = ly1 - ly0
+        ly = (ly0 + ly1) / 2.0
+        if lw < 24.0 or lh > 6.0:
+            continue
+
+        # Exclude text sitting directly on top of the line (underlined headings/phrases)
+        text_on_line = [
+            s for s in ocr_spans
+            if (ly - 13.0) <= (s["rect"].y0 + s["rect"].y1) / 2.0 <= (ly + 1.5)
+            and (min(s["rect"].x1, lx1) - max(s["rect"].x0, lx0)) >= min(18.0, lw * 0.45)
+        ]
+        # Allow if the text is only a short prefix label extending slightly into lx0; reject if text spans the line
+        if text_on_line:
+            rightmost_txt = max(s["rect"].x1 for s in text_on_line)
+            if rightmost_txt - lx0 > max(18.0, lw * 0.35):
+                continue
+
+        # Find left-side OCR label on same baseline
+        left_hits = [
+            s for s in ocr_spans
+            if abs((s["rect"].y0 + s["rect"].y1) / 2.0 - (ly - 6.0)) <= 11.0
+            and s["rect"].x1 <= lx0 + 18.0
+            and (lx0 - s["rect"].x1) <= 130.0
+        ]
+        left_hits.sort(key=lambda s: abs(lx0 - s["rect"].x1))
+
+        below_hits = []
+        if not left_hits:
+            below_hits = [
+                s for s in ocr_spans
+                if 0.0 <= s["rect"].y0 - ly <= 16.0
+                and s["rect"].x0 >= lx0 - 10.0
+                and s["rect"].x1 <= lx1 + 25.0
+                and len(s["text"]) <= 40
+            ]
+            below_hits.sort(key=lambda s: s["rect"].y0)
+
+        # Skip full-width decorative section rules (no left label and no short below label)
+        if lw >= page_w * 0.72 and not left_hits and not below_hits:
+            continue
+        if not left_hits and not below_hits:
+            continue
+
+        field_x0 = lx0
+        lbl_txt = ""
+        if left_hits:
+            lbl_txt = _clean_label(left_hits[0]["text"])
+            if left_hits[0]["rect"].x1 > field_x0 - 2.0:
+                field_x0 = left_hits[0]["rect"].x1 + 4.0
+        elif below_hits:
+            lbl_txt = _clean_label(below_hits[0]["text"])
+
+        if (lx1 - field_x0) < 20.0:
+            continue
+
+        # Skip lines whose "label" is a long contract sentence rather than a field prompt
+        if len(lbl_txt) > 58 and "?" not in lbl_txt and ":" not in lbl_txt:
+            continue
+
+        box_r = pymupdf.Rect(field_x0, max(4.0, ly - 15.5), lx1, max(12.0, ly - 1.0))
+        if _overlaps(box_r, seen):
+            continue
+        seen.append(box_r)
+        f_type = _classify_from_label(lbl_txt, "text")
+        cands.append({
+            "id": f"cand_{len(cands) + 1}",
+            "page_index": page_index,
+            "field_type": f_type,
+            "field_name": _slug(lbl_txt, f"field_{len(cands) + 1}"),
+            "label": lbl_txt or f"Field {len(cands) + 1}",
+            "bbox": rect_to_display(page, box_r),
+            "confidence": 0.86 if left_hits else 0.78,
+            "source": "ocr",
+        })
+
+    # 3. Detect open COMMENTS / NOTES multiline writing area
+    for sp in ocr_spans:
+        t_up = sp["text"].strip().upper()
+        if t_up in ("COMMENTS", "NOTES", "ADDITIONAL COMMENTS"):
+            below_y = sp["rect"].y1 + 8.0
+            next_ys = [o["rect"].y0 for o in ocr_spans if o["rect"].y0 > below_y + 10.0]
+            limit_y = min(next_ys) - 10.0 if next_ys else page_h - 40.0
+            if limit_y - below_y >= 55.0:
+                mr = pymupdf.Rect(42.0, below_y, page_w - 42.0, min(below_y + 110.0, limit_y))
+                if not _overlaps(mr, seen):
+                    seen.append(mr)
+                    cands.append({
+                        "id": f"cand_{len(cands) + 1}",
+                        "page_index": page_index,
+                        "field_type": "multiline",
+                        "field_name": _slug(t_up, "comments"),
+                        "label": sp["text"].strip(),
+                        "bbox": rect_to_display(page, mr),
+                        "confidence": 0.80,
+                        "source": "ocr",
+                    })
+
+    return cands
+
+
+def detect_form_field_candidates_detailed(
+    pdf_bytes: bytes,
+    page_index: int = 0,
+    used_names: Optional[set] = None,
+) -> Dict[str, Any]:
+    """Run Stage A/B/C hybrid form detection on a page and return detailed source & count diagnostics."""
+    doc = pymupdf.open(stream=pdf_bytes, filetype="pdf")
+    try:
+        page = doc[page_index]
+        existing_widgets = list(page.widgets() or [])
+        native_text = page.get_text("text").strip()
+    finally:
+        doc.close()
+
+    cands = detect_form_field_candidates(pdf_bytes, page_index=page_index)
+    if used_names is not None:
+        # Ensure document-wide unique names when scanning multiple pages
+        for c in cands:
+            if c.get("field_type") == "radiobutton":
+                continue
+            base = c["field_name"]
+            cand_name = base
+            idx = 2
+            while cand_name in used_names:
+                suf = f"_{idx}"
+                cand_name = f"{base[:max(1, 40 - len(suf))]}{suf}"
+                idx += 1
+            used_names.add(cand_name)
+            c["field_name"] = cand_name
+
+    geom_cnt = sum(1 for c in cands if c.get("source") == "geometry")
+    ocr_cnt = sum(1 for c in cands if c.get("source") == "ocr")
+    if len(existing_widgets) > 0 and len(cands) == 0:
+        det_mode = "existing_acroform"
+        msg = f"Page {page_index + 1} already has {len(existing_widgets)} interactive AcroForm field(s); no duplicate candidates proposed."
+    elif geom_cnt > 0 and ocr_cnt > 0:
+        det_mode = "hybrid"
+        msg = f"Detected {len(cands)} candidate(s) on Page {page_index + 1} ({geom_cnt} geometry, {ocr_cnt} scanned/OCR)."
+    elif ocr_cnt > 0:
+        det_mode = "ocr"
+        msg = f"Detected {ocr_cnt} candidate(s) from scanned/image content (OCR + vision) on Page {page_index + 1}."
+    elif geom_cnt > 0:
+        det_mode = "geometry"
+        msg = f"Detected {geom_cnt} candidate(s) from page vector geometry on Page {page_index + 1}."
+    else:
+        det_mode = "none"
+        msg = (
+            f"No confident form field candidates found on Page {page_index + 1}"
+            + (" (image-based page)." if not native_text else ".")
+        )
+
+    return {
+        "page_index": page_index,
+        "existing_widgets_count": len(existing_widgets),
+        "geometry_candidates_count": geom_cnt,
+        "ocr_candidates_count": ocr_cnt,
+        "detection_mode": det_mode,
+        "status_message": msg,
+        "candidates": cands,
+    }
 
 
 def delete_form_field(pdf_bytes: bytes, page_index: int, xref: int) -> bytes:

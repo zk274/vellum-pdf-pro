@@ -327,10 +327,13 @@ export const pdfApi = {
   listFormFields: (docId: string) => requestJson<FormFieldItem[]>(`/api/docs/${docId}/forms`),
   inspectFormFields: (docId: string) =>
     requestJson<import('./types').FormInspectionReport>(`/api/docs/${docId}/forms/inspect`),
-  detectFormCandidates: (docId: string, pageIndex: number) =>
-    requestJson<{ page_index: number; candidates: import('./types').FormFieldCandidate[] }>(
+  detectFormCandidates: (docId: string, pageIndex: number, usedNames?: string[]) =>
+    requestJson<import('./types').FormDetectReport>(
       `/api/docs/${docId}/forms/detect-candidates?page_index=${pageIndex}`,
-      { method: 'POST' }
+      {
+        method: 'POST',
+        body: usedNames ? JSON.stringify({ page_index: pageIndex, used_names: usedNames }) : undefined,
+      }
     ),
   createFormField: (docId: string, payload: any) =>
     requestJson<{ summary: DocumentSummary; fields: FormFieldItem[] }>(

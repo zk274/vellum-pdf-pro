@@ -202,7 +202,7 @@ async function run() {
     await sleep(300);
     await client.eval(`
       (() => {
-        const btn = Array.from(document.querySelectorAll('button')).find(b => b.textContent.includes('Detect Fields'));
+        const btn = Array.from(document.querySelectorAll('button')).find(b => b.textContent.includes('Detect Current Page') || b.textContent.includes('Detect Fields'));
         if (btn) btn.click();
       })()
     `);
@@ -215,12 +215,13 @@ async function run() {
     }
     const toolbarState = await client.eval(`({
       hasAcceptAll: Array.from(document.querySelectorAll('button')).some(b => b.textContent.includes('Accept All')),
-      hasConfirmSelected: Array.from(document.querySelectorAll('button')).some(b => b.textContent.includes('Confirm Selected')),
+      hasAcceptSelected: Array.from(document.querySelectorAll('button')).some(b => b.textContent.includes('Accept Selected')),
+      hasRejectSelected: Array.from(document.querySelectorAll('button')).some(b => b.textContent.includes('Reject Selected')),
       hasCancel: Array.from(document.querySelectorAll('button')).some(b => b.textContent.trim() === 'Cancel')
     })`);
     console.log('Detected GEICO form candidate overlays:', candCount, toolbarState);
     assert(candCount === 34, `Expected 34 GEICO candidate overlays, found ${candCount}`);
-    assert(toolbarState.hasAcceptAll && toolbarState.hasConfirmSelected && toolbarState.hasCancel, 'Expected Accept All, Confirm Selected, and Cancel in Prepare Form toolbar');
+    assert(toolbarState.hasAcceptAll && toolbarState.hasAcceptSelected && toolbarState.hasRejectSelected && toolbarState.hasCancel, 'Expected Accept All, Accept Selected, Reject Selected, and Cancel in Prepare Form toolbar');
     await client.screenshot(path.join(shotsDir, 'geico-detected-candidates.png'));
 
     // 4. Click Accept All -> convert all 34 candidates into interactive AcroForm widgets

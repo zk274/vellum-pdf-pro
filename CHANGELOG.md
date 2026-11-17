@@ -14,6 +14,10 @@ The project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html
   - Implemented first-save native **Save As** prompting (`<filename>_filled.pdf` in the original directory, `showOverwriteConfirmation`), **Cancel** preservation, subsequent **Save** (`Ctrl+S`) targeting the chosen output file, header **Save As** (`Ctrl+Shift+S`) button, and immediate `.dirty-dot` feedback on form edits.
 
 ### Added
+- **Hybrid Scanned & Image-Based Form Detection (`Prepare Form`)**:
+  - Added 3-stage hybrid form detection (`Stage A` existing AcroForm preservation, `Stage B` native vector geometry & grid/underline extraction, `Stage C` offline `175 DPI` RapidOCR + OpenCV morphological underline & hollow-checkbox detection) in `backend/engine/forms_signatures.py`.
+  - Added **Detect Current Page**, **Detect All Pages** (with per-page progress & **Cancel Detection**), color-coded field candidates with confidence & `OCR`/`Geometry` source badges, **Accept All** / **Accept Selected** / **Reject Selected** / **Cancel** controls, and `_fillable.pdf` vs `_filled.pdf` smart default save naming.
+  - Validated on the 16-page scanned/mixed NSD application (`tests/fixtures/NNSDFILLABLEAPP (1).pdf`) and 6-page IRS W-9 (`tests/fixtures/W9 Form - March 2024 (1) (3) (1).pdf`).
 - **Interactive PDF Forms (Fill & Authoring / Prepare Form)**:
   - Full AcroForm inspection (`GET /api/docs/{doc_id}/forms/inspect`) supporting single-line text, multiline text, checkboxes, grouped radio buttons, dropdowns, list boxes, and signature placeholders while keeping static PDF vector graphics separate.
   - Non-destructive XFA detection (`is_xfa` flag and UI notice banner) without corrupting XFA packets.

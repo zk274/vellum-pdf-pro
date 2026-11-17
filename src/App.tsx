@@ -337,6 +337,9 @@ export default function App() {
   const [formFillWarnings, setFormFillWarnings] = useState<FormFillWarning[]>([]);
   const [formAutoFit, setFormAutoFit] = useState<boolean>(true);
   const [formSubMode, setFormSubMode] = useState<'fill' | 'prepare'>('fill');
+  const [detectProgress, setDetectProgress] = useState<{ current: number; total: number } | null>(null);
+  const detectCancelledRef = useRef<boolean>(false);
+  const [lastDetectStatus, setLastDetectStatus] = useState<string>('');
   const formWidgetRefs = useRef<Record<number, HTMLElement | null>>({});
 
   // Persistent Text Box Defaults (Black, Helvetica 11pt, Left, Transparent BG, No Border)
@@ -787,18 +790,103 @@ export default function App() {
     }
   }, [mode, formSubMode, activeDoc, commitPendingFormValues]);
 
-  const buildSuggestedSavePath = useCallback((filename: string, filePath?: string | null) => {
-    const baseName = filename || 'Document.pdf';
-    const dotIdx = baseName.toLowerCase().lastIndexOf('.pdf');
-    const stem = dotIdx >= 0 ? baseName.slice(0, dotIdx) : baseName;
-    const filledName = stem.endsWith('_filled') ? `${stem}.pdf` : `${stem}_filled.pdf`;
-    if (filePath && (filePath.includes('/') || filePath.includes('\\'))) {
-      const sep = filePath.includes('\\') && !filePath.includes('/') ? '\\' : '/';
-      const dir = filePath.slice(0, filePath.lastIndexOf(sep));
-      if (dir) return `${dir}${sep}${filledName}`;
+  const buildSuggestedSavePath = useCallback(
+    (filename: string, filePath?: string | null) => {
+      const baseName = filename || 'Document.pdf';
+      const dotIdx = baseName.toLowerCase().lastIndexOf('.pdf');
+      const stem = dotIdx >= 0 ? baseName.slice(0, dotIdx) : baseName;
+      const hasFilledVal =
+        Boolean(activeDoc && formDirtyRef.current[activeDoc.doc_id]) ||
+        Object.values(formDraftValuesRef.current).some(
+          (v) => v === true || (typeof v === 'string' && v.trim().length > 0)
+        );
+      const suffix = formFields.length > 0 && !hasFilledVal ? '_fillable' : '_filled';
+      const outName =
+        stem.endsWith('_filled') || stem.endsWith('_fillable') ? `${stem}.pdf` : `${stem}${suffix}.pdf`;
+      if (filePath && (filePath.includes('/') || filePath.includes('\\'))) {
+        const sep = filePath.includes('\\') && !filePath.includes('/') ? '\\' : '/';
+        const dir = filePath.slice(0, filePath.lastIndexOf(sep));
+        if (dir) return `${dir}${sep}${outName}`;
+      }
+      return outName;
+    },
+    [activeDoc, formFields.length]
+  );
+
+  const runDetectCurrentPage = useCallback(async () => {
+    if (!activeDoc) return;
+    setFormSubMode('prepare');
+    setSubTool('select');
+    const res = await pdfApi.detectFormCandidates(activeDoc.doc_id, currentPage);
+    const cands = (res.candidates || []).map((c) => ({ ...c, accepted: true }));
+    setFormCandidates(cands);
+    setLastDetectStatus(res.status_message || '');
+    setRightOpen(true);
+    notify(res.status_message || `Detected ${cands.length} candidate(s) on Page ${currentPage + 1}.`);
+  }, [activeDoc, currentPage, notify]);
+
+  const runDetectAllPages = useCallback(async () => {
+    if (!activeDoc) return;
+    setFormSubMode('prepare');
+    setSubTool('select');
+    detectCancelledRef.current = false;
+    const total = activeDoc.page_count;
+    const allCands: FormFieldCandidate[] = [];
+    const usedNames: string[] = formFields.map((f) => f.field_name);
+    let geomTotal = 0;
+    let ocrTotal = 0;
+    let existingTotal = 0;
+
+    for (let p = 0; p < total; p++) {
+      if (detectCancelledRef.current) break;
+      setDetectProgress({ current: p + 1, total });
+      const res = await pdfApi.detectFormCandidates(activeDoc.doc_id, p, usedNames);
+      existingTotal += res.existing_widgets_count || 0;
+      geomTotal += res.geometry_candidates_count || 0;
+      ocrTotal += res.ocr_candidates_count || 0;
+      const pageCands = (res.candidates || []).map((c) => {
+        if (!usedNames.includes(c.field_name)) usedNames.push(c.field_name);
+        return { ...c, accepted: true };
+      });
+      allCands.push(...pageCands);
+      setFormCandidates([...allCands]);
     }
-    return filledName;
-  }, []);
+
+    setDetectProgress(null);
+    const cancelled = detectCancelledRef.current;
+    const summaryMsg = cancelled
+      ? `Detection canceled. Kept ${allCands.length} candidate(s) found so far.`
+      : `Scanned ${total} page(s): ${existingTotal} existing widget(s), ${geomTotal} geometry candidate(s), ${ocrTotal} scanned/OCR candidate(s).`;
+    setLastDetectStatus(summaryMsg);
+    setRightOpen(true);
+    notify(summaryMsg);
+  }, [activeDoc, formFields, notify]);
+
+  const confirmFormCandidatesList = useCallback(
+    async (candsToInsert: FormFieldCandidate[], label: string) => {
+      if (!activeDoc) return;
+      let lastSummary = activeDoc;
+      for (const c of candsToInsert) {
+        const res = await pdfApi.createFormField(activeDoc.doc_id, {
+          page_index: c.page_index,
+          field_type: c.field_type,
+          field_name: c.field_name,
+          bbox: c.bbox,
+          multiline: c.field_type === 'multiline',
+          tooltip: c.label,
+          fill_color_hex: 'transparent',
+          border_color_hex: 'transparent',
+        });
+        lastSummary = res.summary;
+      }
+      setFormCandidates([]);
+      setFormSubMode('fill');
+      setSubTool('select');
+      await refreshDocState(activeDoc.doc_id, currentPage, lastSummary);
+      notify(`${label} (${candsToInsert.length} field(s)).`);
+    },
+    [activeDoc, currentPage, notify, refreshDocState]
+  );
 
   const handleSave = async (saveAs = false) => {
     if (!activeDoc) return;
@@ -3051,22 +3139,7 @@ export default function App() {
                     <CheckCircle2 size={14} /> Save Filled Values
                   </button>
                   {pageFormFields.length === 0 && (
-                    <button
-                      className="tool-btn"
-                      onClick={async () => {
-                        setFormSubMode('prepare');
-                        setSubTool('select');
-                        const res = await pdfApi.detectFormCandidates(activeDoc.doc_id, currentPage);
-                        const cands = (res.candidates || []).map((c) => ({ ...c, accepted: true }));
-                        setFormCandidates(cands);
-                        setRightOpen(true);
-                        notify(
-                          cands.length > 0
-                            ? `Switched to Prepare Form and detected ${cands.length} candidate field(s) on Page ${currentPage + 1}.`
-                            : `Switched to Prepare Form. No static candidates detected on Page ${currentPage + 1}.`
-                        );
-                      }}
-                    >
+                    <button className="tool-btn" onClick={runDetectCurrentPage}>
                       <Sparkles size={14} /> Detect Fields
                     </button>
                   )}
@@ -3075,75 +3148,64 @@ export default function App() {
                 <>
                   <button
                     className="tool-btn"
-                    onClick={async () => {
-                      const res = await pdfApi.detectFormCandidates(activeDoc.doc_id, currentPage);
-                      const cands = (res.candidates || []).map((c) => ({ ...c, accepted: true }));
-                      setFormCandidates(cands);
-                      setRightOpen(true);
-                      notify(
-                        cands.length > 0
-                          ? `Detected ${cands.length} potential form field(s) on Page ${currentPage + 1}. Review overlays or Inspector, then Confirm.`
-                          : `No static box/checkbox candidates detected on Page ${currentPage + 1}.`
-                      );
-                    }}
+                    onClick={runDetectCurrentPage}
+                    disabled={Boolean(detectProgress)}
+                    title="Detect form fields on current page (Stage A/B/C)"
                   >
-                    <Sparkles size={14} /> Detect Fields
+                    <Sparkles size={14} /> Detect Current Page
                   </button>
-                  {formCandidates.length > 0 && (
+                  <button
+                    className="tool-btn"
+                    onClick={runDetectAllPages}
+                    disabled={Boolean(detectProgress)}
+                    title="Scan all pages for form fields"
+                  >
+                    Detect All Pages
+                  </button>
+                  {detectProgress && (
+                    <>
+                      <span style={{ fontSize: 12, color: '#38bdf8', padding: '0 6px' }}>
+                        Scanning {detectProgress.current}/{detectProgress.total}…
+                      </span>
+                      <button
+                        className="tool-btn danger"
+                        onClick={() => {
+                          detectCancelledRef.current = true;
+                        }}
+                      >
+                        Cancel Detection
+                      </button>
+                    </>
+                  )}
+                  {formCandidates.length > 0 && !detectProgress && (
                     <>
                       <button
                         className="tool-btn primary"
-                        onClick={async () => {
-                          let lastSummary = activeDoc;
-                          for (const c of formCandidates) {
-                            const res = await pdfApi.createFormField(activeDoc.doc_id, {
-                              page_index: c.page_index,
-                              field_type: c.field_type,
-                              field_name: c.field_name,
-                              bbox: c.bbox,
-                              multiline: c.field_type === 'multiline',
-                              tooltip: c.label,
-                              fill_color_hex: 'transparent',
-                              border_color_hex: 'transparent',
-                            });
-                            lastSummary = res.summary;
-                          }
-                          const count = formCandidates.length;
-                          setFormCandidates([]);
-                          setFormSubMode('fill');
-                          setSubTool('select');
-                          await refreshDocState(activeDoc.doc_id, currentPage, lastSummary);
-                          notify(`Accepted and inserted all ${count} detected form field(s).`);
-                        }}
+                        onClick={() => confirmFormCandidatesList(formCandidates, 'Accepted and inserted all detected fields')}
                       >
                         Accept All ({formCandidates.length})
                       </button>
                       <button
                         className="tool-btn"
-                        onClick={async () => {
-                          const selected = formCandidates.filter((c) => c.accepted !== false);
-                          let lastSummary = activeDoc;
-                          for (const c of selected) {
-                            const res = await pdfApi.createFormField(activeDoc.doc_id, {
-                              page_index: c.page_index,
-                              field_type: c.field_type,
-                              field_name: c.field_name,
-                              bbox: c.bbox,
-                              multiline: c.field_type === 'multiline',
-                              tooltip: c.label,
-                              fill_color_hex: 'transparent',
-                              border_color_hex: 'transparent',
-                            });
-                            lastSummary = res.summary;
-                          }
-                          setFormCandidates([]);
-                          setFormSubMode('fill');
-                          setSubTool('select');
-                          await refreshDocState(activeDoc.doc_id, currentPage, lastSummary);
-                          notify(`Inserted ${selected.length} confirmed form field(s).`);
-                        }}
+                        onClick={() =>
+                          confirmFormCandidatesList(
+                            formCandidates.filter((c) => c.accepted !== false),
+                            'Confirmed selected fields'
+                          )
+                        }
                       >
-                        Confirm Selected ({formCandidates.filter((c) => c.accepted !== false).length})
+                        Accept Selected ({formCandidates.filter((c) => c.accepted !== false).length})
+                      </button>
+                      <button
+                        className="tool-btn"
+                        onClick={() =>
+                          setFormCandidates((prev) =>
+                            prev.filter((c) => c.accepted === false)
+                          )
+                        }
+                        title="Remove checked candidates from proposals"
+                      >
+                        Reject Selected
                       </button>
                       <button className="tool-btn" onClick={() => setFormCandidates([])}>
                         Cancel
@@ -4257,15 +4319,29 @@ export default function App() {
                     .filter((c) => c.page_index === currentPage)
                     .map((cand) => {
                       const isAccepted = cand.accepted !== false;
+                      const strokeColor = !isAccepted
+                        ? '#94a3b8'
+                        : cand.field_type === 'checkbox' || cand.field_type === 'radiobutton'
+                        ? '#9333ea'
+                        : cand.field_type === 'signature' || cand.field_type === 'multiline'
+                        ? '#d97706'
+                        : '#16a34a';
+                      const bgColor = !isAccepted
+                        ? 'rgba(148, 163, 184, 0.10)'
+                        : cand.field_type === 'checkbox' || cand.field_type === 'radiobutton'
+                        ? 'rgba(147, 51, 234, 0.14)'
+                        : cand.field_type === 'signature' || cand.field_type === 'multiline'
+                        ? 'rgba(217, 119, 6, 0.14)'
+                        : 'rgba(22, 163, 74, 0.14)';
                       return (
                         <div
-                          key={cand.id}
+                          key={`${cand.page_index}_${cand.id}`}
                           className={`form-candidate-box ${isAccepted ? 'accepted' : 'rejected'}`}
-                          title={`${cand.field_name} (${cand.field_type}) — Click to ${isAccepted ? 'reject' : 'accept'}`}
+                          title={`${cand.field_name} (${cand.field_type}, ${Math.round((cand.confidence || 0.8) * 100)}% ${cand.source || 'geometry'}) — Click to ${isAccepted ? 'reject' : 'accept'}`}
                           onClick={(e) => {
                             e.stopPropagation();
                             setFormCandidates((prev) =>
-                              prev.map((c) => (c.id === cand.id ? { ...c, accepted: !isAccepted } : c))
+                              prev.map((c) => (c.id === cand.id && c.page_index === cand.page_index ? { ...c, accepted: !isAccepted } : c))
                             );
                           }}
                           style={{
@@ -4274,8 +4350,8 @@ export default function App() {
                             top: `${cand.bbox[1] * zoom}px`,
                             width: `${Math.max(14, (cand.bbox[2] - cand.bbox[0]) * zoom)}px`,
                             height: `${Math.max(12, (cand.bbox[3] - cand.bbox[1]) * zoom)}px`,
-                            border: isAccepted ? '2px dashed #16a34a' : '2px dashed #94a3b8',
-                            background: isAccepted ? 'rgba(22, 163, 74, 0.14)' : 'rgba(148, 163, 184, 0.10)',
+                            border: `2px dashed ${strokeColor}`,
+                            background: bgColor,
                             cursor: 'pointer',
                             zIndex: 9,
                             boxSizing: 'border-box',
@@ -6294,17 +6370,23 @@ export default function App() {
                     </div>
                   )}
 
+                  {lastDetectStatus && (
+                    <div className="inspector-section" style={{ borderLeft: '3px solid #38bdf8', paddingLeft: 8 }}>
+                      <p className="hint-text" style={{ margin: 0 }}>{lastDetectStatus}</p>
+                    </div>
+                  )}
+
                   {formCandidates.length > 0 && (
                     <div className="inspector-section">
                       <h4>
                         <Sparkles size={14} /> Suggested Fields ({formCandidates.length})
                       </h4>
                       <p className="hint-text">
-                        Review and confirm before inserting interactive fields into the PDF.
+                        Review confidence, rename/retype, or adjust boundaries on canvas before confirming.
                       </p>
                       {formCandidates.map((cand) => (
                         <div
-                          key={cand.id}
+                          key={`${cand.page_index}_${cand.id}`}
                           style={{
                             padding: '6px 0',
                             borderBottom: '1px solid var(--border-subtle)',
@@ -6319,7 +6401,11 @@ export default function App() {
                               checked={cand.accepted !== false}
                               onChange={(e) =>
                                 setFormCandidates((prev) =>
-                                  prev.map((c) => (c.id === cand.id ? { ...c, accepted: e.target.checked } : c))
+                                  prev.map((c) =>
+                                    c.id === cand.id && c.page_index === cand.page_index
+                                      ? { ...c, accepted: e.target.checked }
+                                      : c
+                                  )
                                 )
                               }
                             />
@@ -6328,7 +6414,11 @@ export default function App() {
                               value={cand.field_name}
                               onChange={(e) =>
                                 setFormCandidates((prev) =>
-                                  prev.map((c) => (c.id === cand.id ? { ...c, field_name: e.target.value } : c))
+                                  prev.map((c) =>
+                                    c.id === cand.id && c.page_index === cand.page_index
+                                      ? { ...c, field_name: e.target.value }
+                                      : c
+                                  )
                                 )
                               }
                               style={{ flex: 1, fontSize: 11.5 }}
@@ -6337,7 +6427,11 @@ export default function App() {
                               value={cand.field_type}
                               onChange={(e) =>
                                 setFormCandidates((prev) =>
-                                  prev.map((c) => (c.id === cand.id ? { ...c, field_type: e.target.value } : c))
+                                  prev.map((c) =>
+                                    c.id === cand.id && c.page_index === cand.page_index
+                                      ? { ...c, field_type: e.target.value }
+                                      : c
+                                  )
                                 )
                               }
                               style={{ fontSize: 11 }}
@@ -6345,59 +6439,34 @@ export default function App() {
                               <option value="text">text</option>
                               <option value="multiline">multiline</option>
                               <option value="checkbox">checkbox</option>
+                              <option value="radiobutton">radiobutton</option>
+                              <option value="dropdown">dropdown</option>
+                              <option value="date">date</option>
+                              <option value="signature">signature</option>
                             </select>
                           </label>
+                          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 10.5, opacity: 0.75, paddingLeft: 20 }}>
+                            <span>P{cand.page_index + 1} · {cand.source === 'ocr' ? 'Scanned OCR' : 'Geometry'}</span>
+                            <span>{Math.round((cand.confidence || 0.8) * 100)}% conf</span>
+                          </div>
                         </div>
                       ))}
                       <div style={{ display: 'flex', gap: 6, marginTop: 8, flexWrap: 'wrap' }}>
                         <button
                           className="tool-btn primary"
                           style={{ flex: 1 }}
-                          onClick={async () => {
-                            const selected = formCandidates.filter((c) => c.accepted !== false);
-                            let lastSummary = activeDoc;
-                            for (const c of selected) {
-                              const res = await pdfApi.createFormField(activeDoc.doc_id, {
-                                page_index: c.page_index,
-                                field_type: c.field_type,
-                                field_name: c.field_name,
-                                bbox: c.bbox,
-                                multiline: c.field_type === 'multiline',
-                                tooltip: c.label,
-                                fill_color_hex: 'transparent',
-                                border_color_hex: 'transparent',
-                              });
-                              lastSummary = res.summary;
-                            }
-                            setFormCandidates([]);
-                            await refreshDocState(activeDoc.doc_id, currentPage, lastSummary);
-                            notify(`Inserted ${selected.length} confirmed form field(s).`);
-                          }}
+                          onClick={() =>
+                            confirmFormCandidatesList(
+                              formCandidates.filter((c) => c.accepted !== false),
+                              'Confirmed selected fields'
+                            )
+                          }
                         >
-                          Confirm Selected ({formCandidates.filter((c) => c.accepted !== false).length})
+                          Accept Selected ({formCandidates.filter((c) => c.accepted !== false).length})
                         </button>
                         <button
                           className="tool-btn"
-                          onClick={async () => {
-                            let lastSummary = activeDoc;
-                            for (const c of formCandidates) {
-                              const res = await pdfApi.createFormField(activeDoc.doc_id, {
-                                page_index: c.page_index,
-                                field_type: c.field_type,
-                                field_name: c.field_name,
-                                bbox: c.bbox,
-                                multiline: c.field_type === 'multiline',
-                                tooltip: c.label,
-                                fill_color_hex: 'transparent',
-                                border_color_hex: 'transparent',
-                              });
-                              lastSummary = res.summary;
-                            }
-                            const count = formCandidates.length;
-                            setFormCandidates([]);
-                            await refreshDocState(activeDoc.doc_id, currentPage, lastSummary);
-                            notify(`Accepted and inserted all ${count} detected form field(s).`);
-                          }}
+                          onClick={() => confirmFormCandidatesList(formCandidates, 'Accepted all detected fields')}
                         >
                           Accept All
                         </button>
